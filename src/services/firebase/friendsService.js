@@ -63,36 +63,33 @@ export const getPendingRequests = async (userId) => {
 };
 
 // Accept friend request
+// Accept friend request
 export const acceptFriendRequest = async (requestId, userId, fromUserId) => {
   try {
     const requestRef = firestoreDoc(db, "friendRequests", requestId);
 
-    // 1. Update request
-    await updateDoc(requestRef, {
-      status: "accepted",
-      updatedAt: serverTimestamp(),
-    });
-
-    // 2. Create refs FIRST
+    // 1. Create refs FIRST
     const friendRef1 = firestoreDoc(db, "friends", `${userId}_${fromUserId}`);
     const friendRef2 = firestoreDoc(db, "friends", `${fromUserId}_${userId}`);
 
-    // 3. Prevent duplicate
+    // 2. Prevent duplicate
     const existing = await getDoc(friendRef1);
     if (existing.exists()) return;
 
-    // 4. Create both sides
-    await setDoc(friendRef1, {
-      userId,
-      friendId: fromUserId,
-      connectedAt: serverTimestamp(),
-    });
-
-    await setDoc(friendRef2, {
-      userId: fromUserId,
-      friendId: userId,
-      connectedAt: serverTimestamp(),
-    });
+    // 3. Create both sides of friendship
+    await Promise.all([
+      setDoc(friendRef1, {
+        userId,
+        friendId: fromUserId,
+        connectedAt: serverTimestamp(),
+      }),
+      setDoc(friendRef2, {
+        userId: fromUserId,
+        friendId: userId,
+        connectedAt: serverTimestamp(),
+      }),
+      deleteDoc(requestRef), // Delete the friend request
+    ]);
 
     return true;
   } catch (error) {
@@ -105,10 +102,7 @@ export const acceptFriendRequest = async (requestId, userId, fromUserId) => {
 export const rejectFriendRequest = async (requestId) => {
   try {
     const requestRef = firestoreDoc(db, "friendRequests", requestId);
-    await updateDoc(requestRef, {
-      status: "rejected",
-      updatedAt: serverTimestamp(),
-    });
+    await deleteDoc(requestRef); // Delete instead of updating status
     return true;
   } catch (error) {
     console.error("Error rejecting friend request:", error);
@@ -152,8 +146,12 @@ export const getUserFriends = async (userId) => {
 export const removeFriend = async (userId, friendId) => {
   try {
     const friendRef1 = firestoreDoc(db, "friends", `${userId}_${friendId}`);
+    const friendRef2 = firestoreDoc(db, "friends", `${friendId}_${userId}`);
     
-    await deleteDoc(friendRef1);
+    await Promise.all([
+      deleteDoc(friendRef1),
+      deleteDoc(friendRef2),
+    ]);
     return true;
   } catch (error) {
     console.error("Error removing friend:", error);
@@ -167,7 +165,6 @@ export const getSentRequests = async (userId) => {
     const q = query(
       collection(db, "friendRequests"),
       where("fromUserId", "==", userId),
-      where("status", "==", "pending")
     );
     const snapshot = await getDocs(q);
     
