@@ -1,18 +1,40 @@
 import TransactionItem from '@/src/components/finance/TransactionItem';
+import TransactionFilterSheet from '@/src/components/finance/TransactionFilterSheet';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import { db } from '@/src/firebaseConfig';
 import { useRouter } from 'expo-router';
-import { collection, getDocs, orderBy, query } from 'firebase/firestore';
-import { Plus } from 'lucide-react-native';
+import {
+  collection,
+  getDocs,
+  orderBy,
+  query,
+} from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import {
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+} from 'react-native';
 
 export default function TransactionsScreen() {
   const router = useRouter();
   const { currentProfile } = useProfile();
+
   const [transactions, setTransactions] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // 🔥 Filter state
+  const [filterVisible, setFilterVisible] = useState(false);
+  const [filters, setFilters] = useState<{
+    type?: 'all' | 'income' | 'expense';
+    category?: string | null;
+    startDate?: Date | null;
+    endDate?: Date | null;
+  }>({});
 
   useEffect(() => {
     if (currentProfile) {
@@ -25,16 +47,18 @@ export default function TransactionsScreen() {
 
     setLoading(true);
     try {
-      const transactionsSnapshot = await getDocs(
+      const snapshot = await getDocs(
         query(
           collection(db, 'profiles', currentProfile.id, 'transactions'),
           orderBy('date', 'desc')
         )
       );
+
       const data: any[] = [];
-      transactionsSnapshot.forEach((doc) => {
+      snapshot.forEach((doc) => {
         data.push({ id: doc.id, ...doc.data() });
       });
+
       setTransactions(data);
     } catch (error) {
       console.error('Error loading transactions:', error);
@@ -43,25 +67,56 @@ export default function TransactionsScreen() {
     }
   };
 
+  // 🔥 Apply filters locally
+  const filteredTransactions = transactions.filter((t) => {
+    if (filters.type && filters.type !== 'all' && t.type !== filters.type)
+      return false;
+
+    if (filters.category && t.category !== filters.category)
+      return false;
+
+    if (filters.startDate && new Date(t.date) < filters.startDate)
+      return false;
+
+    if (filters.endDate && new Date(t.date) > filters.endDate)
+      return false;
+
+    return true;
+  });
+
   return (
     <View style={styles.container}>
+      <View style={{ height: 20 }} />
+
+      {/* HEADER */}
       <View style={styles.header}>
         <Text style={styles.title}>Transactions</Text>
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => router.push('/transactions/add-expense')}
-        >
-          <Plus color={colors.card} size={24} />
+
+        <TouchableOpacity onPress={() => setFilterVisible(true)}>
+          <Text style={styles.filterBtn}>Filter</Text>
         </TouchableOpacity>
       </View>
 
+      {/* ACTIVE FILTER INDICATOR */}
+      {(filters.type ||
+        filters.category ||
+        filters.startDate ||
+        filters.endDate) && (
+        <View style={styles.activeFilters}>
+          <Text style={styles.activeText}>
+            Filters applied
+          </Text>
+        </View>
+      )}
+
+      {/* LIST */}
       <ScrollView
         style={styles.list}
         refreshControl={
           <RefreshControl refreshing={loading} onRefresh={loadTransactions} />
         }
       >
-        {transactions.map((transaction) => (
+        {filteredTransactions.map((transaction) => (
           <TransactionItem
             key={transaction.id}
             type={transaction.type}
@@ -70,10 +125,21 @@ export default function TransactionsScreen() {
             date={transaction.date}
             notes={transaction.notes}
             icon={transaction.categoryIcon}
-            onPress={() => router.push('/transactions')}
+            onPress={() => router.push(`/transactions/${transaction.id}`)}
           />
         ))}
+
+        {filteredTransactions.length === 0 && (
+          <Text style={styles.empty}>No transactions found</Text>
+        )}
       </ScrollView>
+
+      {/* 🔥 FILTER SHEET */}
+      <TransactionFilterSheet
+        visible={filterVisible}
+        onClose={() => setFilterVisible(false)}
+        onApply={(f) => setFilters(f)}
+      />
     </View>
   );
 }
@@ -95,16 +161,25 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.text,
   },
-  addButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
+  filterBtn: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  activeFilters: {
+    paddingHorizontal: 24,
+    marginBottom: 8,
+  },
+  activeText: {
+    color: colors.textSecondary,
+    fontSize: 12,
   },
   list: {
     flex: 1,
     paddingHorizontal: 24,
+  },
+  empty: {
+    textAlign: 'center',
+    marginTop: 40,
+    color: colors.textSecondary,
   },
 });

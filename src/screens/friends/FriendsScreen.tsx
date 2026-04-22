@@ -1,6 +1,12 @@
 import FriendCard from '@/src/components/finance/FriendCard';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
+import { getUserSplits } from '@/src/services/firebase/splitService';
+import SplitCard from '@/src/components/finance/SplitCard';
+import { calculateNetBalances } from '@/src/utils/splitUtils';
+import { simplifyDebts, buildMaps } from '@/src/utils/splitUtils';
+import { doc, updateDoc } from 'firebase/firestore';
+import { db } from '@/src/firebaseConfig';
 import {
   acceptFriendRequest,
   getPendingRequests,
@@ -30,13 +36,124 @@ export default function FriendsScreen() {
   const [sentRequests, setSentRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'friends' | 'pending' | 'sent'>('friends');
+  const [activeTab, setActiveTab] = useState<'friends' | 'pending' | 'sent' | 'splits'>('friends');
+  const [splits, setSplits] = useState<any[]>([]);
+  const [balances, setBalances] = useState<Record<string, number>>({});
+  const [settlements, setSettlements] = useState<any[]>([]);
 
   useEffect(() => {
     if (currentProfile) {
       loadFriendsData();
+      loadSplits();
     }
   }, [currentProfile]);
+
+  // const mergeSettlements = (settlements: any[], currentUser: string) => {
+  //   const oweMap: Record<string, number> = {};
+  //   const getMap: Record<string, number> = {};
+
+  //   settlements.forEach((s) => {
+  //     if (s.from === currentUser) {
+  //       oweMap[s.to] = (oweMap[s.to] || 0) + s.amount;
+  //     } else if (s.to === currentUser) {
+  //       getMap[s.from] = (getMap[s.from] || 0) + s.amount;
+  //     }
+  //   });
+
+  //   return { oweMap, getMap };
+  // };
+
+  const handleSettle = async (friendId: string) => {
+    try {
+      const updatedSplits = splits.map((split) => {
+        const isInvolved = split.participants.some(
+          (p: any) => p.userId === friendId
+        );
+
+        if (!isInvolved) return split;
+
+        const updatedParticipants = split.participants.map((p: any) => {
+          if (
+            p.userId === currentProfile!.userId ||
+            p.userId === friendId
+          ) {
+            return { ...p, paid: true };
+          }
+          return p;
+        });
+
+        return {
+          ...split,
+          participants: updatedParticipants,
+        };
+      });
+
+      // 🔥 Update all in DB
+      await Promise.all(
+        updatedSplits.map((s) =>
+          updateDoc(doc(db, 'splits', s.id), {
+            participants: s.participants,
+          })
+        )
+      );
+
+      Alert.alert('Settled', 'All balances cleared!');
+      loadSplits();
+    } catch (err) {
+      console.error(err);
+      Alert.alert('Error', 'Failed to settle');
+    }
+  };
+
+  const handleSettleAll = async () => {
+    try {
+      const updatedSplits = splits.map((split) => {
+        const updatedParticipants = split.participants.map((p: any) => ({
+          ...p,
+          paid: true,
+        }));
+
+        return {
+          ...split,
+          participants: updatedParticipants,
+        };
+      });
+
+      await Promise.all(
+        updatedSplits.map((s) =>
+          updateDoc(doc(db, 'splits', s.id), {
+            participants: s.participants,
+          })
+        )
+      );
+
+      Alert.alert('Settled', 'All balances cleared!');
+      loadSplits();
+    } catch (err) {
+      console.error(err);
+      Alert.alert('Error', 'Failed to settle all');
+    }
+  };
+
+  const loadSplits = async () => {
+    const data = await getUserSplits(currentProfile!.userId);
+    setSplits(data);
+
+    const result = calculateNetBalances(data);
+    setBalances(result);
+
+    const simplified = simplifyDebts(result);
+    setSettlements(simplified);
+  };
+
+  const friendMap = Object.fromEntries(
+    friends.map(f => [f.friendId, f.profileData?.name || f.friendId])
+  );
+
+  const getName = (id: string) => {
+    if (id === currentProfile?.userId) return 'You';
+    return friendMap[id] || id;
+  };
 
   const loadFriendsData = async () => {
     if (!currentProfile?.userId) return;
@@ -44,9 +161,9 @@ export default function FriendsScreen() {
     setLoading(true);
     try {
       const [friendsList, pendingList, sentList] = await Promise.all([
-        getUserFriends(currentProfile.userId),
-        getPendingRequests(currentProfile.userId),
-        getSentRequests(currentProfile.userId),
+        getUserFriends(currentProfile!.userId),
+        getPendingRequests(currentProfile!.userId),
+        getSentRequests(currentProfile!.userId),
       ]);
 
       setFriends(friendsList);
@@ -86,7 +203,7 @@ export default function FriendsScreen() {
       'Remove Friend',
       `Are you sure you want to remove ${friendName} as a friend?`,
       [
-        { text: 'Cancel', onPress: () => {}, style: 'cancel' },
+        { text: 'Cancel', onPress: () => { }, style: 'cancel' },
         {
           text: 'Remove',
           onPress: async () => {
@@ -109,8 +226,134 @@ export default function FriendsScreen() {
     router.push('/friends/add');
   };
 
+  const totalOwed = Object.values(balances)
+    .filter(v => v > 0)
+    .reduce((a, b) => a + b, 0);
+
+  const totalYouOwe = Object.values(balances)
+    .filter(v => v < 0)
+    .reduce((a, b) => a + Math.abs(b), 0);
+
+  const renderSplits = () => {
+    if (splits.length === 0) {
+      return (
+        <View style={styles.emptyState}>
+          <Users size={48} color={colors.textSecondary} />
+          <Text style={styles.emptyText}>No splits yet</Text>
+        </View>
+      );
+    }
+    if (!currentProfile) return null;
+
+    const { oweMap, getMap } = buildMaps(
+      settlements,
+      currentProfile.userId
+    );
+
+    const hasBalance = Object.values(balances).some(
+      (v) => Math.abs(v) > 0.01
+    );
+
+    const totalYouOwe = Object.values(oweMap).reduce((a, b) => a + b, 0);
+    const totalOwed = Object.values(getMap).reduce((a, b) => a + b, 0);
+
+    return (
+      <>
+        {hasBalance && (
+          <TouchableOpacity
+            onPress={handleSettleAll}
+            style={{
+              backgroundColor: '#2563eb',
+              padding: 12,
+              borderRadius: 8,
+              marginBottom: 16,
+              alignItems: 'center',
+            }}
+          >
+            <Text style={{ color: '#fff', fontWeight: '600' }}>
+              Settle All
+            </Text>
+          </TouchableOpacity>
+        )}
+        {/* 🔥 DASHBOARD */}
+        <View style={styles.dashboard}>
+          <Text style={styles.dashboardLabel}>You get</Text>
+          <Text style={styles.green}>₹{totalOwed}</Text>
+
+          <Text style={styles.dashboardLabel}>You owe</Text>
+          <Text style={styles.red}>₹{totalYouOwe}</Text>
+
+          <Text style={styles.net}>
+            Net ₹{totalOwed - totalYouOwe}
+          </Text>
+        </View>
+
+        {/* 🔴 YOU OWE */}
+        {Object.entries(oweMap).length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>You owe</Text>
+
+            {Object.entries(oweMap).map(([userId, amount]) => (
+              <View key={userId} style={styles.settlementCard}>
+                <View>
+                  <Text style={styles.name}>{getName(userId)}</Text>
+                  <Text style={styles.subText}>You owe</Text>
+                </View>
+
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={styles.red}>₹{Number(amount).toFixed(2)}</Text>
+
+                  <TouchableOpacity
+                    onPress={() => router.push(`/friends/${userId}`)}
+                  >
+                    <Text style={styles.settleBtn}>Settle</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+          </>
+        )}
+
+        {/* 🟢 YOU GET */}
+        {Object.entries(getMap).length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>You get</Text>
+
+            {Object.entries(getMap).map(([userId, amount]) => (
+              <View key={userId} style={styles.settlementCard}>
+                <View>
+                  <Text style={styles.name}>{getName(userId)}</Text>
+                  <Text style={styles.subText}>You get</Text>
+                </View>
+
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={styles.green}>₹{Number(amount).toFixed(2)}</Text>
+
+                  <TouchableOpacity
+                    onPress={() => router.push(`/friends/${userId}`)}
+                  >
+                    <Text style={styles.settleBtn}>Settle</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+          </>
+        )}
+
+        {/* 🎉 ALL SETTLED */}
+        {!hasBalance && (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyText}>All settled 🎉</Text>
+          </View>
+        )}
+      </>
+    );
+  };
+
   const renderContent = () => {
     switch (activeTab) {
+      case 'splits':
+        return renderSplits();
       case 'pending':
         return (
           <View style={styles.tabContent}>
@@ -236,12 +479,28 @@ export default function FriendsScreen() {
             Sent ({sentRequests.length})
           </Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'splits' && styles.activeTab]}
+          onPress={() => setActiveTab('splits')}
+        >
+          <Text
+            style={[
+              styles.tabText,
+              activeTab === 'splits' && styles.activeTabText,
+            ]}
+          >
+            Splits ({splits.length})
+          </Text>
+        </TouchableOpacity>
       </View>
 
       <ScrollView
         style={styles.list}
         refreshControl={
-          <RefreshControl refreshing={loading} onRefresh={loadFriendsData} />
+          <RefreshControl refreshing={loading} onRefresh={() => {
+            loadFriendsData();
+            loadSplits(); // ✅ added
+          }} />
         }
       >
         {renderContent()}
@@ -324,5 +583,84 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 8,
     textAlign: 'center',
+  },
+  settlementCard: {
+    backgroundColor: colors.card,
+    padding: 14,
+    borderRadius: 10,
+    marginBottom: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+
+  detailsBtn: {
+    marginTop: 16,
+    padding: 12,
+    alignItems: 'center',
+  },
+
+  detailsText: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
+
+  dashboard: {
+    backgroundColor: colors.card,
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+
+  dashboardText: { color: colors.textSecondary },
+
+  dashboardNet: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 8,
+  },
+
+  settlementText: { fontWeight: '500' },
+
+  amount: { fontWeight: '700' },
+
+  green: {
+    color: '#16a34a',
+    fontWeight: '700',
+  },
+
+  red: {
+    color: '#dc2626',
+    fontWeight: '700',
+  },
+
+  net: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+
+  dashboardLabel: {
+    color: colors.textSecondary,
+    marginTop: 6,
+  },
+
+  name: {
+    fontWeight: '600',
+  },
+
+  subText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+  },
+  sectionTitle: {
+    fontWeight: '700',
+    marginBottom: 8,
+    marginTop: 16,
+  },
+  settleBtn: {
+    marginTop: 6,
+    color: colors.primary,
+    fontWeight: '600',
+    fontSize: 12,
   },
 });
