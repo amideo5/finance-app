@@ -1,13 +1,20 @@
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '@/src/constants/categories';
+
 interface Transaction {
   type: string;
+  kind?: string;
   amount: number;
   date: string;
-  category_id: string;
+  categoryId?: string;
+  category_id?: string;
+  category?: string;
 }
 
 interface Budget {
-  category_id: string;
-  limit_amount: number;
+  categoryId?: string;
+  category_id?: string;
+  limitAmount?: number;
+  limit_amount?: number;
 }
 
 export interface Insight {
@@ -18,6 +25,10 @@ export interface Insight {
   icon: string;
 }
 
+const categoryIdsByName = new Map(
+  [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES].map((category) => [category.name.toLowerCase(), category.id])
+);
+
 export function generateInsights(
   transactions: Transaction[],
   budgets: Budget[],
@@ -26,16 +37,16 @@ export function generateInsights(
   const insights: Insight[] = [];
 
   const currentMonthExpenses = transactions
-    .filter(t => t.type === 'expense')
-    .reduce((sum, t) => sum + t.amount, 0);
+    .filter(t => t.type === 'expense' && t.kind !== 'repayment')
+    .reduce((sum, t) => sum + Math.round(t.amount * 100), 0);
 
   const currentMonthIncome = transactions
-    .filter(t => t.type === 'income')
-    .reduce((sum, t) => sum + t.amount, 0);
+    .filter(t => t.type === 'income' && t.kind !== 'repayment')
+    .reduce((sum, t) => sum + Math.round(t.amount * 100), 0);
 
   const previousMonthExpenses = previousMonthTransactions
-    .filter(t => t.type === 'expense')
-    .reduce((sum, t) => sum + t.amount, 0);
+    .filter(t => t.type === 'expense' && t.kind !== 'repayment')
+    .reduce((sum, t) => sum + Math.round(t.amount * 100), 0);
 
   if (previousMonthExpenses > 0) {
     const changePercent = ((currentMonthExpenses - previousMonthExpenses) / previousMonthExpenses) * 100;
@@ -82,18 +93,23 @@ export function generateInsights(
   }
 
   const categoryExpenses = new Map<string, number>();
-  transactions.filter(t => t.type === 'expense').forEach(t => {
-    const current = categoryExpenses.get(t.category_id) || 0;
-    categoryExpenses.set(t.category_id, current + t.amount);
+  transactions.filter(t => t.type === 'expense' && t.kind !== 'repayment').forEach(t => {
+    const categoryNameId = t.category ? categoryIdsByName.get(t.category.toLowerCase()) : undefined;
+    const categoryId = t.categoryId || t.category_id || categoryNameId || t.category || 'uncategorized';
+    const current = categoryExpenses.get(categoryId) || 0;
+    categoryExpenses.set(categoryId, current + Math.round(t.amount * 100));
   });
 
   budgets.forEach(budget => {
-    const spent = categoryExpenses.get(budget.category_id) || 0;
-    const percentage = (spent / budget.limit_amount) * 100;
+    const categoryId = budget.categoryId || budget.category_id;
+    const limitAmount = budget.limitAmount ?? budget.limit_amount ?? 0;
+    if (!categoryId || limitAmount <= 0) return;
+    const spent = categoryExpenses.get(categoryId) || 0;
+    const percentage = (spent / Math.round(limitAmount * 100)) * 100;
 
     if (percentage >= 100) {
       insights.push({
-        id: `budget-exceeded-${budget.category_id}`,
+        id: `budget-exceeded-${categoryId}`,
         type: 'warning',
         title: 'Budget Exceeded',
         message: `You've exceeded your budget by ${(percentage - 100).toFixed(0)}%`,
@@ -101,7 +117,7 @@ export function generateInsights(
       });
     } else if (percentage >= 80) {
       insights.push({
-        id: `budget-warning-${budget.category_id}`,
+        id: `budget-warning-${categoryId}`,
         type: 'warning',
         title: 'Budget Alert',
         message: `You've used ${percentage.toFixed(0)}% of your budget`,

@@ -2,8 +2,10 @@
   "name": "functions",
   "description": "Cloud Functions for Firebase",
   "scripts": {
-    "lint": "echo 'Skipping lint'",
-    "serve": "firebase emulators:start --only functions",
+    "lint": "eslint index.js",
+    "test": "node --test test/*.test.js",
+    "test:emulator": "node --test test/emulator.test.js",
+    "serve": "firebase emulators:start --only auth,firestore,functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",

@@ -1,11 +1,11 @@
 import { auth, db } from '@/src/firebaseConfig';
 import {
-  createUserWithEmailAndPassword,
-  signOut as firebaseSignOut,
-  User as FirebaseUser,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  updateProfile
+    createUserWithEmailAndPassword,
+    signOut as firebaseSignOut,
+    User as FirebaseUser,
+    onAuthStateChanged,
+    signInWithEmailAndPassword,
+    updateProfile
 } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
 import React, { createContext, useContext, useEffect, useState } from 'react';
@@ -80,6 +80,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await setDoc(doc(db, "profiles", uid), {
         userId: uid,
         name: name,
+        nameLower: name.trim().toLowerCase(),
         type: "personal",
         emoji: "👤",
         currency: "INR",
@@ -119,21 +120,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // PIN SYSTEM
   // --------------------------------------------
   const hasPin = async () => {
-    const pin = await SecureStore.getItemAsync("user_pin");
+    if (!user) return false;
+    const pin = await SecureStore.getItemAsync(`user_pin_${user.uid}`);
     return pin !== null;
   };
 
   const setPin = async (pin: string) => {
-    await SecureStore.setItemAsync("user_pin", pin);
+    if (!user) throw new Error('A signed-in user is required to set a PIN.');
+    await SecureStore.setItemAsync(`user_pin_${user.uid}`, pin);
   };
 
   const verifyPin = async (pin: string) => {
-    const stored = await SecureStore.getItemAsync("user_pin");
+    if (!user) return false;
+    const stored = await SecureStore.getItemAsync(`user_pin_${user.uid}`);
     return stored === pin;
   };
 
   const removePin = async () => {
-    await SecureStore.deleteItemAsync("user_pin");
+    if (!user) return;
+    await SecureStore.deleteItemAsync(`user_pin_${user.uid}`);
   };
 
   return (

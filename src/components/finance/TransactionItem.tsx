@@ -5,6 +5,7 @@ import { formatCurrency, formatShortDate } from '@/src/utils/format';
 
 interface TransactionItemProps {
   type: 'income' | 'expense';
+  kind?: 'source' | 'allocation' | 'repayment';
   category: string;
   amount: number;
   date: string;
@@ -15,6 +16,7 @@ interface TransactionItemProps {
 
 export default function TransactionItem({
   type,
+  kind,
   category,
   amount,
   date,
@@ -30,18 +32,18 @@ export default function TransactionItem({
       disabled={!onPress}
     >
       <View style={styles.iconContainer}>
-        <Text style={styles.icon}>{icon || (type === 'income' ? '💰' : '💳')}</Text>
+        <Text style={styles.icon}>{icon || (kind === 'repayment' ? '↔️' : type === 'income' ? '💰' : '💳')}</Text>
       </View>
       <View style={styles.details}>
-        <Text style={styles.category}>{category}</Text>
+        <Text style={styles.category}>{kind === 'repayment' ? `${category} · repayment` : kind === 'allocation' ? `${category} · allocation` : kind === 'source' ? `${category} · shared expense source` : category}</Text>
         {notes && <Text style={styles.notes} numberOfLines={1}>{notes}</Text>}
         <Text style={styles.date}>{formatShortDate(date)}</Text>
       </View>
       <Text style={[
         styles.amount,
-        type === 'income' ? styles.incomeAmount : styles.expenseAmount
+        kind === 'source' ? styles.sourceAmount : kind === 'repayment' ? styles.repaymentAmount : type === 'income' ? styles.incomeAmount : styles.expenseAmount
       ]}>
-        {type === 'income' ? '+' : '-'}{formatCurrency(amount)}
+        {kind === 'source' ? '↗ ' : kind === 'repayment' ? '↔ ' : type === 'income' ? '+' : '-'}{formatCurrency(amount)}
       </Text>
     </TouchableOpacity>
   );
@@ -95,5 +97,11 @@ const styles = StyleSheet.create({
   },
   expenseAmount: {
     color: colors.expense,
+  },
+  repaymentAmount: {
+    color: colors.primary,
+  },
+  sourceAmount: {
+    color: colors.textSecondary,
   },
 });

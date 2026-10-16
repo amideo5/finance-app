@@ -1,5 +1,5 @@
-import { db } from "../firebase";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { db } from "../../firebaseConfig";
 
 export const setBudget = async (profileId, categoryId, month, year, amount) => {
   const budgetId = `${categoryId}_${year}_${month}`;

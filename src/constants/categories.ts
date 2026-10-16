@@ -1,21 +1,21 @@
 export const EXPENSE_CATEGORIES = [
-  { name: 'Food & Dining', icon: '🍽️', color: '#EF4444' },
-  { name: 'Transportation', icon: '🚗', color: '#F59E0B' },
-  { name: 'Shopping', icon: '🛍️', color: '#8B5CF6' },
-  { name: 'Entertainment', icon: '🎬', color: '#EC4899' },
-  { name: 'Bills & Utilities', icon: '📋', color: '#3B82F6' },
-  { name: 'Healthcare', icon: '⚕️', color: '#10B981' },
-  { name: 'Education', icon: '📚', color: '#6366F1' },
-  { name: 'Travel', icon: '✈️', color: '#14B8A6' },
-  { name: 'Personal Care', icon: '💆', color: '#F97316' },
-  { name: 'Other', icon: '📦', color: '#6B7280' },
+  { id: 'food', name: 'Food & Dining', icon: '🍽️', color: '#EF4444' },
+  { id: 'transportation', name: 'Transportation', icon: '🚗', color: '#F59E0B' },
+  { id: 'shopping', name: 'Shopping', icon: '🛍️', color: '#8B5CF6' },
+  { id: 'entertainment', name: 'Entertainment', icon: '🎬', color: '#EC4899' },
+  { id: 'bills', name: 'Bills & Utilities', icon: '📋', color: '#3B82F6' },
+  { id: 'health', name: 'Healthcare', icon: '⚕️', color: '#10B981' },
+  { id: 'education', name: 'Education', icon: '📚', color: '#6366F1' },
+  { id: 'travel', name: 'Travel', icon: '✈️', color: '#14B8A6' },
+  { id: 'personal_care', name: 'Personal Care', icon: '💆', color: '#F97316' },
+  { id: 'misc', name: 'Other', icon: '📦', color: '#6B7280' },
 ];
 
 export const INCOME_CATEGORIES = [
-  { name: 'Salary', icon: '💼', color: '#10B981' },
-  { name: 'Business', icon: '🏢', color: '#3B82F6' },
-  { name: 'Investments', icon: '📈', color: '#8B5CF6' },
-  { name: 'Other Income', icon: '💰', color: '#6B7280' },
+  { id: 'salary', name: 'Salary', icon: '💼', color: '#10B981' },
+  { id: 'business_income', name: 'Business', icon: '🏢', color: '#3B82F6' },
+  { id: 'investments', name: 'Investments', icon: '📈', color: '#8B5CF6' },
+  { id: 'other_income', name: 'Other Income', icon: '💰', color: '#6B7280' },
 ];
 
 export const ACCOUNT_TYPES = [

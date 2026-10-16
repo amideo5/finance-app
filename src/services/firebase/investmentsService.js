@@ -1,5 +1,5 @@
-import { db } from "../firebase";
-import { doc, setDoc, collection, serverTimestamp } from "firebase/firestore";
+import { collection, doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { db } from "../../firebaseConfig";
 
 export const addInvestment = async (profileId, data) => {
   const investRef = doc(collection(db, "profiles", profileId, "investments"));

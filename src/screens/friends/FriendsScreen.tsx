@@ -1,31 +1,27 @@
 import FriendCard from '@/src/components/finance/FriendCard';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { getUserSplits } from '@/src/services/firebase/splitService';
-import SplitCard from '@/src/components/finance/SplitCard';
-import { calculateNetBalances } from '@/src/utils/splitUtils';
-import { simplifyDebts, buildMaps } from '@/src/utils/splitUtils';
-import { doc, updateDoc } from 'firebase/firestore';
-import { db } from '@/src/firebaseConfig';
 import {
-  acceptFriendRequest,
-  getPendingRequests,
-  getSentRequests,
-  getUserFriends,
-  rejectFriendRequest,
-  removeFriend
+    acceptFriendRequest,
+    getPendingRequests,
+    getSentRequests,
+    getUserFriends,
+    rejectFriendRequest,
+    removeFriend
 } from '@/src/services/firebase/friendsService';
+import { getSplitSettlements, getUserSplits } from '@/src/services/firebase/splitService';
+import { buildMaps, calculateNetBalances, getOutstandingObligations, simplifyDebts } from '@/src/utils/splitUtils';
 import { useRouter } from 'expo-router';
 import { UserPlus, Users } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
-  Alert,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View
+    Alert,
+    RefreshControl,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
 } from 'react-native';
 
 export default function FriendsScreen() {
@@ -40,13 +36,7 @@ export default function FriendsScreen() {
   const [splits, setSplits] = useState<any[]>([]);
   const [balances, setBalances] = useState<Record<string, number>>({});
   const [settlements, setSettlements] = useState<any[]>([]);
-
-  useEffect(() => {
-    if (currentProfile) {
-      loadFriendsData();
-      loadSplits();
-    }
-  }, [currentProfile]);
+  const [outstandingTotalPaise, setOutstandingTotalPaise] = useState(0);
 
   // const mergeSettlements = (settlements: any[], currentUser: string) => {
   //   const oweMap: Record<string, number> = {};
@@ -63,88 +53,18 @@ export default function FriendsScreen() {
   //   return { oweMap, getMap };
   // };
 
-  const handleSettle = async (friendId: string) => {
-    try {
-      const updatedSplits = splits.map((split) => {
-        const isInvolved = split.participants.some(
-          (p: any) => p.userId === friendId
-        );
-
-        if (!isInvolved) return split;
-
-        const updatedParticipants = split.participants.map((p: any) => {
-          if (
-            p.userId === currentProfile!.userId ||
-            p.userId === friendId
-          ) {
-            return { ...p, paid: true };
-          }
-          return p;
-        });
-
-        return {
-          ...split,
-          participants: updatedParticipants,
-        };
-      });
-
-      // 🔥 Update all in DB
-      await Promise.all(
-        updatedSplits.map((s) =>
-          updateDoc(doc(db, 'splits', s.id), {
-            participants: s.participants,
-          })
-        )
-      );
-
-      Alert.alert('Settled', 'All balances cleared!');
-      loadSplits();
-    } catch (err) {
-      console.error(err);
-      Alert.alert('Error', 'Failed to settle');
-    }
-  };
-
-  const handleSettleAll = async () => {
-    try {
-      const updatedSplits = splits.map((split) => {
-        const updatedParticipants = split.participants.map((p: any) => ({
-          ...p,
-          paid: true,
-        }));
-
-        return {
-          ...split,
-          participants: updatedParticipants,
-        };
-      });
-
-      await Promise.all(
-        updatedSplits.map((s) =>
-          updateDoc(doc(db, 'splits', s.id), {
-            participants: s.participants,
-          })
-        )
-      );
-
-      Alert.alert('Settled', 'All balances cleared!');
-      loadSplits();
-    } catch (err) {
-      console.error(err);
-      Alert.alert('Error', 'Failed to settle all');
-    }
-  };
-
-  const loadSplits = async () => {
+  const loadSplits = useCallback(async () => {
+    if (!currentProfile?.userId) return;
     const data = await getUserSplits(currentProfile!.userId);
     setSplits(data);
-
-    const result = calculateNetBalances(data);
+    const settlementRows = (await Promise.all(data.map((split) => getSplitSettlements(split.id)))).flat();
+    const result = calculateNetBalances(data, settlementRows);
     setBalances(result);
+    setOutstandingTotalPaise(getOutstandingObligations(data, settlementRows).reduce((sum, item) => sum + item.amountInPaise, 0));
 
     const simplified = simplifyDebts(result);
     setSettlements(simplified);
-  };
+  }, [currentProfile]);
 
   const friendMap = Object.fromEntries(
     friends.map(f => [f.friendId, f.profileData?.name || f.friendId])
@@ -155,7 +75,7 @@ export default function FriendsScreen() {
     return friendMap[id] || id;
   };
 
-  const loadFriendsData = async () => {
+  const loadFriendsData = useCallback(async () => {
     if (!currentProfile?.userId) return;
 
     setLoading(true);
@@ -175,7 +95,16 @@ export default function FriendsScreen() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentProfile]);
+
+  useEffect(() => {
+    if (currentProfile) {
+      // Fetch remote friend and split records when the active profile changes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadFriendsData();
+      void loadSplits();
+    }
+  }, [currentProfile, loadFriendsData, loadSplits]);
 
   const handleAcceptRequest = async (requestId: string, fromUserId: string) => {
     try {
@@ -226,14 +155,6 @@ export default function FriendsScreen() {
     router.push('/friends/add');
   };
 
-  const totalOwed = Object.values(balances)
-    .filter(v => v > 0)
-    .reduce((a, b) => a + b, 0);
-
-  const totalYouOwe = Object.values(balances)
-    .filter(v => v < 0)
-    .reduce((a, b) => a + Math.abs(b), 0);
-
   const renderSplits = () => {
     if (splits.length === 0) {
       return (
@@ -250,48 +171,38 @@ export default function FriendsScreen() {
       currentProfile.userId
     );
 
-    const hasBalance = Object.values(balances).some(
-      (v) => Math.abs(v) > 0.01
-    );
+    const hasBalance = Object.values(balances).some((value) => value !== 0);
 
     const totalYouOwe = Object.values(oweMap).reduce((a, b) => a + b, 0);
     const totalOwed = Object.values(getMap).reduce((a, b) => a + b, 0);
+    const totalSharedPaise = splits.filter((split) => split.status !== 'cancelled')
+      .reduce((sum, split) => sum + split.totalAmountInPaise, 0);
 
     return (
       <>
-        {hasBalance && (
-          <TouchableOpacity
-            onPress={handleSettleAll}
-            style={{
-              backgroundColor: '#2563eb',
-              padding: 12,
-              borderRadius: 8,
-              marginBottom: 16,
-              alignItems: 'center',
-            }}
-          >
-            <Text style={{ color: '#fff', fontWeight: '600' }}>
-              Settle All
-            </Text>
-          </TouchableOpacity>
-        )}
         {/* 🔥 DASHBOARD */}
         <View style={styles.dashboard}>
+          <Text style={styles.dashboardLabel}>Total shared expenses</Text>
+          <Text style={styles.name}>₹{(totalSharedPaise / 100).toFixed(2)}</Text>
+          <Text style={styles.dashboardLabel}>Outstanding split obligations</Text>
+          <Text style={styles.name}>₹{(outstandingTotalPaise / 100).toFixed(2)}</Text>
           <Text style={styles.dashboardLabel}>You get</Text>
-          <Text style={styles.green}>₹{totalOwed}</Text>
+          <Text style={styles.green}>₹{(totalOwed / 100).toFixed(2)}</Text>
 
           <Text style={styles.dashboardLabel}>You owe</Text>
-          <Text style={styles.red}>₹{totalYouOwe}</Text>
+          <Text style={styles.red}>₹{(totalYouOwe / 100).toFixed(2)}</Text>
 
           <Text style={styles.net}>
-            Net ₹{totalOwed - totalYouOwe}
+            Net ₹{((totalOwed - totalYouOwe) / 100).toFixed(2)}
           </Text>
         </View>
+
+        <Text style={styles.subText}>Net settlement suggestions simplify balances across splits; they do not record a payment. Repayments are submitted and approved in each split.</Text>
 
         {/* 🔴 YOU OWE */}
         {Object.entries(oweMap).length > 0 && (
           <>
-            <Text style={styles.sectionTitle}>You owe</Text>
+            <Text style={styles.sectionTitle}>Suggested net payments — you owe</Text>
 
             {Object.entries(oweMap).map(([userId, amount]) => (
               <View key={userId} style={styles.settlementCard}>
@@ -301,13 +212,7 @@ export default function FriendsScreen() {
                 </View>
 
                 <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.red}>₹{Number(amount).toFixed(2)}</Text>
-
-                  <TouchableOpacity
-                    onPress={() => router.push(`/friends/${userId}`)}
-                  >
-                    <Text style={styles.settleBtn}>Settle</Text>
-                  </TouchableOpacity>
+                  <Text style={styles.red}>₹{(amount / 100).toFixed(2)}</Text>
                 </View>
               </View>
             ))}
@@ -317,7 +222,7 @@ export default function FriendsScreen() {
         {/* 🟢 YOU GET */}
         {Object.entries(getMap).length > 0 && (
           <>
-            <Text style={styles.sectionTitle}>You get</Text>
+            <Text style={styles.sectionTitle}>Suggested net payments — you receive</Text>
 
             {Object.entries(getMap).map(([userId, amount]) => (
               <View key={userId} style={styles.settlementCard}>
@@ -327,13 +232,7 @@ export default function FriendsScreen() {
                 </View>
 
                 <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.green}>₹{Number(amount).toFixed(2)}</Text>
-
-                  <TouchableOpacity
-                    onPress={() => router.push(`/friends/${userId}`)}
-                  >
-                    <Text style={styles.settleBtn}>Settle</Text>
-                  </TouchableOpacity>
+                  <Text style={styles.green}>₹{(amount / 100).toFixed(2)}</Text>
                 </View>
               </View>
             ))}
@@ -346,6 +245,16 @@ export default function FriendsScreen() {
             <Text style={styles.emptyText}>All settled 🎉</Text>
           </View>
         )}
+        <Text style={styles.sectionTitle}>Recent splits</Text>
+        {splits.slice(0, 10).map((split) => (
+          <TouchableOpacity key={split.id} style={styles.settlementCard} onPress={() => router.push(`/splits/${split.id}`)}>
+            <View>
+              <Text style={styles.name}>{split.title || 'Shared expense'}</Text>
+              <Text style={styles.subText}>{String(split.status || 'pending').replaceAll('_', ' ')}</Text>
+            </View>
+            <Text style={styles.name}>₹{(split.totalAmountInPaise / 100).toFixed(2)}</Text>
+          </TouchableOpacity>
+        ))}
       </>
     );
   };

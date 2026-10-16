@@ -1,5 +1,5 @@
-import { db } from "../firebase";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { db } from "../../firebaseConfig";
 
 export const setNetWorthSnapshot = async (
   profileId,

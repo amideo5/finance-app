@@ -5,18 +5,16 @@ import { colors } from '@/src/constants/colors';
 import { useAuth } from '@/src/context/AuthContext';
 import { useProfile } from '@/src/context/ProfileContext';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { Alert, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import {
-  db
+    db
 } from '@/src/firebaseConfig';
 
-import {
-  addDoc,
-  collection,
-  getDocs
-} from 'firebase/firestore';
+import { addTransaction } from '@/src/services/firebase/transactionsService';
+import { isDateKey, parsePositiveAmount, toLocalDateKey } from '@/src/utils/validation';
+import { collection, getDocs } from 'firebase/firestore';
 
 export default function AddExpenseScreen() {
   const router = useRouter();
@@ -28,11 +26,11 @@ export default function AddExpenseScreen() {
   const [transactionType, setTransactionType] = useState<'expense' | 'income'>('expense');
   const [selectedPaymentMode, setSelectedPaymentMode] = useState('cash');
   const [notes, setNotes] = useState('');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(toLocalDateKey(new Date()));
   const [loading, setLoading] = useState(false);
 
-  const [expenseCategories, setExpenseCategories] = useState<any[]>(EXPENSE_CATEGORIES);
-  const [incomeCategories, setIncomeCategories] = useState<any[]>(INCOME_CATEGORIES);
+  const expenseCategories = EXPENSE_CATEGORIES;
+  const incomeCategories = INCOME_CATEGORIES;
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
 
@@ -49,7 +47,7 @@ export default function AddExpenseScreen() {
   // -------------------------------------------------------
   // LOAD ACCOUNTS (Firebase)
   // -------------------------------------------------------
-  const loadAccounts = async () => {
+  const loadAccounts = useCallback(async () => {
     if (!currentProfile) return;
 
     try {
@@ -63,48 +61,56 @@ export default function AddExpenseScreen() {
     } catch (e) {
       console.log("Account Load Error:", e);
     }
-  };
+  }, [currentProfile]);
 
   useEffect(() => {
     if (currentProfile) {
-      loadAccounts();
+      // Async account loading synchronizes the selected profile with Firestore.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadAccounts();
     }
-  }, [currentProfile]);
+  }, [currentProfile, loadAccounts]);
 
 
   // -------------------------------------------------------
   // SUBMIT TRANSACTION (Firebase)
   // -------------------------------------------------------
   const handleSubmit = async () => {
-    if (!amount || !selectedCategory || !currentProfile || !user) return;
+    const parsedAmount = parsePositiveAmount(amount);
+    if (!parsedAmount || !selectedCategory || !currentProfile || !user) {
+      Alert.alert('Check transaction details', 'Enter a positive amount and choose a category.');
+      return;
+    }
+    if (!isDateKey(date)) {
+      Alert.alert('Invalid date', 'Enter a valid date in YYYY-MM-DD format.');
+      return;
+    }
 
     setLoading(true);
 
     try {
-      await addDoc(
-        collection(db, "profiles", currentProfile.id, "transactions"),
-        {
-          profileId: currentProfile.id,
-          userId: user.uid,
-          type: transactionType,
-          amount: parseFloat(amount),
-          category: selectedCategory.name,
-          categoryIcon: selectedCategory.icon,
-          paymentMode: selectedPaymentMode,
-          accountId: selectedAccount,
-          notes: notes.trim() || null,
-          date,
-          currency: currentProfile.currency || "INR",
-          createdAt: new Date(),
-        }
-      );
+      await addTransaction(currentProfile.id, {
+        profileId: currentProfile.id,
+        userId: user.uid,
+        type: transactionType,
+        amount: parsedAmount,
+        categoryId: selectedCategory.id,
+        category: selectedCategory.name,
+        categoryIcon: selectedCategory.icon,
+        paymentMode: selectedPaymentMode,
+        accountId: selectedAccount,
+        notes: notes.trim() || null,
+        date,
+        currency: currentProfile.currency || 'INR',
+      });
 
       router.back();
-    } catch (e) {
-      console.log("Transaction Error:", e);
+    } catch (error) {
+      console.error('Transaction Error:', error);
+      Alert.alert('Error', 'Could not save the transaction. Please try again.');
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   // -------------------------------------------------------

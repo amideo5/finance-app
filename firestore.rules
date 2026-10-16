@@ -1,0 +1,232 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath(profileId) {
+      return /databases/$(database)/documents/profiles/$(profileId);
+    }
+
+    function memberPath(profileId, userId) {
+      return /databases/$(database)/documents/profiles/$(profileId)/members/$(userId);
+    }
+
+    function profileOwner(profileId) {
+      return signedIn()
+        && exists(profilePath(profileId))
+        && get(profilePath(profileId)).data.userId == request.auth.uid;
+    }
+
+    function profileMember(profileId) {
+      return signedIn()
+        && exists(memberPath(profileId, request.auth.uid));
+    }
+
+    function canAccessProfile(profileId) {
+      return profileOwner(profileId) || profileMember(profileId);
+    }
+
+    function canEditProfile(profileId) {
+      return profileOwner(profileId)
+        || (
+          profileMember(profileId)
+          && get(memberPath(profileId, request.auth.uid)).data.role in ['owner', 'editor']
+        );
+    }
+
+    function sourceTransactionReleased(profileId, transactionId) {
+      let lockPath = /databases/$(database)/documents/splitSourceLocks/$(profileId)/transactions/$(transactionId);
+      return !exists(lockPath) || get(lockPath).data.status == 'released';
+    }
+
+    function acceptedFriendRequestExists(userId, friendId) {
+      let forwardPath = /databases/$(database)/documents/friendRequests/$(userId + '_' + friendId);
+      let reversePath = /databases/$(database)/documents/friendRequests/$(friendId + '_' + userId);
+
+      return (
+        existsAfter(forwardPath)
+        && getAfter(forwardPath).data.status == 'accepted'
+      ) || (
+        existsAfter(reversePath)
+        && getAfter(reversePath).data.status == 'accepted'
+      );
+    }
+
+    match /users/{userId} {
+      allow read, create, update, delete:
+        if signedIn() && request.auth.uid == userId;
+    }
+
+    match /profiles/{profileId} {
+      // Required by the app's current friend-search query.
+      // All signed-in users can read profile metadata.
+      allow read: if signedIn();
+
+      allow create:
+        if signedIn()
+        && request.resource.data.userId == request.auth.uid;
+
+      allow update:
+        if profileOwner(profileId)
+        && request.resource.data.userId == resource.data.userId;
+
+      allow delete: if profileOwner(profileId);
+
+      match /members/{memberId} {
+        allow read: if canAccessProfile(profileId);
+
+        allow create:
+          if profileOwner(profileId)
+          && request.resource.data.role in ['owner', 'editor', 'viewer'];
+
+        allow update:
+          if profileOwner(profileId)
+          && request.resource.data.role in ['owner', 'editor', 'viewer'];
+
+        allow delete: if profileOwner(profileId);
+      }
+
+      match /accounts/{accountId} {
+        allow read: if canAccessProfile(profileId);
+        allow create, update, delete: if canEditProfile(profileId);
+      }
+
+      match /transactions/{transactionId} {
+        allow read: if canAccessProfile(profileId);
+        allow create:
+          if canEditProfile(profileId)
+          && !request.resource.data.keys().hasAny(['kind', 'splitId', 'settlementId', 'serverGenerated']);
+
+        allow update:
+          if canEditProfile(profileId)
+          && !resource.data.keys().hasAny(['kind', 'serverGenerated'])
+          && !request.resource.data.keys().hasAny(['kind', 'splitId', 'settlementId', 'serverGenerated'])
+          && sourceTransactionReleased(profileId, transactionId);
+
+        allow delete:
+          if canEditProfile(profileId)
+          && !resource.data.keys().hasAny(['kind', 'serverGenerated'])
+          && sourceTransactionReleased(profileId, transactionId);
+      }
+
+      match /budgets/{budgetId} {
+        allow read: if canAccessProfile(profileId);
+        allow create, update, delete: if canEditProfile(profileId);
+      }
+
+      match /goals/{goalId} {
+        allow read: if canAccessProfile(profileId);
+        allow create, update, delete: if canEditProfile(profileId);
+      }
+
+      match /investments/{investmentId} {
+        allow read: if canAccessProfile(profileId);
+        allow create, update, delete: if canEditProfile(profileId);
+
+        match /transactions/{transactionId} {
+          allow read: if canAccessProfile(profileId);
+          allow create, update, delete: if canEditProfile(profileId);
+        }
+      }
+
+      match /netWorthSnapshots/{snapshotId} {
+        allow read: if canAccessProfile(profileId);
+        allow create, update, delete: if canEditProfile(profileId);
+      }
+    }
+
+    match /categories/{categoryId} {
+      allow read: if signedIn();
+
+      // Seed/manage categories using an admin-claimed account or Admin SDK.
+      allow create, update, delete:
+        if signedIn() && request.auth.token.admin == true;
+    }
+
+    match /friendRequests/{requestId} {
+      allow read:
+        if signedIn()
+        && (
+          resource.data.fromUserId == request.auth.uid
+          || resource.data.toUserId == request.auth.uid
+        );
+
+      allow create:
+        if signedIn()
+        && request.resource.data.fromUserId == request.auth.uid
+        && request.resource.data.toUserId is string
+        && request.resource.data.toUserId != request.auth.uid
+        && requestId == request.auth.uid + '_' + request.resource.data.toUserId
+        && request.resource.data.status == 'pending';
+
+      allow update:
+        if signedIn()
+        && resource.data.toUserId == request.auth.uid
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'accepted'
+        && request.resource.data.fromUserId == resource.data.fromUserId
+        && request.resource.data.toUserId == resource.data.toUserId
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'updatedAt']);
+
+      // The current app rejects requests by deleting them as the recipient.
+      allow delete:
+        if signedIn() && resource.data.toUserId == request.auth.uid;
+    }
+
+    match /friends/{friendshipId} {
+      allow read:
+        if signedIn() && resource.data.userId == request.auth.uid;
+
+      allow create:
+        if signedIn()
+        && friendshipId ==
+          request.resource.data.userId + '_' + request.resource.data.friendId
+        && (
+          request.resource.data.userId == request.auth.uid
+          || request.resource.data.friendId == request.auth.uid
+        )
+        && acceptedFriendRequestExists(
+          request.resource.data.userId,
+          request.resource.data.friendId
+        );
+
+      allow delete:
+        if signedIn()
+        && (
+          resource.data.userId == request.auth.uid
+          || resource.data.friendId == request.auth.uid
+        );
+
+      allow update: if false;
+    }
+
+    match /splits/{splitId} {
+      allow read:
+        if signedIn()
+        && (request.auth.uid == resource.data.createdBy
+          || request.auth.uid == resource.data.paidByUserId
+          || request.auth.uid in resource.data.participantIds);
+
+      // Split creation, state transitions, and cancellation are trusted-function only.
+      allow create, update, delete: if false;
+
+      match /settlements/{settlementId} {
+        allow read: if signedIn()
+          && (
+            request.auth.uid == get(/databases/$(database)/documents/splits/$(splitId)).data.createdBy
+            || request.auth.uid == get(/databases/$(database)/documents/splits/$(splitId)).data.paidByUserId
+            || request.auth.uid in get(/databases/$(database)/documents/splits/$(splitId)).data.participantIds
+          );
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /splitSourceLocks/{profileId}/transactions/{transactionId} {
+      allow read, create, update, delete: if false;
+    }
+  }
+}

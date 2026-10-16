@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
-import { useRouter } from 'expo-router';
-import Input from '@/src/components/ui/Input';
 import Button from '@/src/components/ui/Button';
+import Input from '@/src/components/ui/Input';
 import { colors } from '@/src/constants/colors';
 import { useAuth } from '@/src/context/AuthContext';
 import { validateEmail, validatePassword } from '@/src/utils/validators';
+import { useRouter } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -93,7 +93,7 @@ export default function LoginScreen() {
           />
 
           <View style={styles.footer}>
-            <Text style={styles.footerText}>Don't have an account? </Text>
+            <Text style={styles.footerText}>Don&apos;t have an account? </Text>
             <Button
               title="Sign Up"
               onPress={() => router.push('/auth/signup')}

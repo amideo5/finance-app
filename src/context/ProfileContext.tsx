@@ -1,21 +1,22 @@
-import React, { createContext, useState, useEffect, useContext } from "react";
 import { db } from "@/src/firebaseConfig";
-import { useAuth } from "./AuthContext";
 import {
-  collection,
-  query,
-  where,
-  getDocs,
-  addDoc,
-  doc,
-  updateDoc,
-  deleteDoc,
+    addDoc,
+    collection,
+    deleteDoc,
+    doc,
+    getDocs,
+    query,
+    updateDoc,
+    where,
 } from "firebase/firestore";
+import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { useAuth } from "./AuthContext";
 
 interface Profile {
   id: string;
   userId: string;
   name: string;
+  nameLower?: string;
   type: string;
   emoji: string;
   currency: string;
@@ -44,7 +45,7 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   // Load profiles from Firestore
-  const loadProfiles = async () => {
+  const loadProfiles = useCallback(async () => {
     if (!user) {
       setProfiles([]);
       setCurrentProfile(null);
@@ -61,6 +62,12 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
       const snapshot = await getDocs(q);
       const list: Profile[] = [];
 
+      await Promise.all(snapshot.docs
+        .filter((docSnap) => !docSnap.data().nameLower && docSnap.data().name)
+        .map((docSnap) => updateDoc(doc(db, "profiles", docSnap.id), {
+          nameLower: docSnap.data().name.trim().toLowerCase(),
+        })));
+
       snapshot.forEach((docSnap) =>
         list.push({ id: docSnap.id, ...docSnap.data() } as Profile)
       );
@@ -75,11 +82,13 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [user]);
 
   useEffect(() => {
-    loadProfiles();
-  }, [user]);
+    // The provider must clear stale profile state when Firebase signs out.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadProfiles();
+  }, [loadProfiles]);
 
   const switchProfile = (profileId: string) => {
     const p = profiles.find((p) => p.id === profileId) || null;
@@ -92,6 +101,7 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
     const newProfile = {
       userId: user.uid,
       name: profile.name || "New Profile",
+      nameLower: (profile.name || "New Profile").trim().toLowerCase(),
       type: profile.type || "personal",
       emoji: profile.emoji || "👤",
       currency: profile.currency || "INR",
@@ -108,7 +118,10 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
 
   const updateProfile = async (profileId: string, updates: Partial<Profile>) => {
     const ref = doc(db, "profiles", profileId);
-    await updateDoc(ref, { ...updates, updatedAt: new Date() });
+    const normalizedUpdates = updates.name === undefined
+      ? updates
+      : { ...updates, nameLower: updates.name.trim().toLowerCase() };
+    await updateDoc(ref, { ...normalizedUpdates, updatedAt: new Date() });
     await loadProfiles();
   };
 

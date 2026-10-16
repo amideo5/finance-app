@@ -47,16 +47,14 @@ export default function TransactionDetail() {
         {new Date(transaction.date).toDateString()}
       </Text>
 
-      <TouchableOpacity
-        style={styles.btn}
-        onPress={() =>
-          router.push(
-            `/splits/create?txId=${id}&amount=${transaction.amount}`
-          )
-        }
-      >
-        <Text style={styles.btnText}>Split with friends</Text>
-      </TouchableOpacity>
+      {transaction.type === 'expense' && transaction.currency === 'INR' && !transaction.kind && (
+        <TouchableOpacity
+          style={styles.btn}
+          onPress={() => router.push(`/splits/create?txId=${id}`)}
+        >
+          <Text style={styles.btnText}>Split with friends</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }

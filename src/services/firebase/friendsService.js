@@ -1,20 +1,41 @@
 import {
     collection,
     deleteDoc,
-    doc as firestoreDoc, getDoc,
+    doc as firestoreDoc,
     getDocs,
     query,
+    runTransaction,
     serverTimestamp,
     setDoc,
-    updateDoc,
     where,
 } from "firebase/firestore";
 import { db } from "../../firebaseConfig";
+
+const loadProfilesByUserIds = async (userIds) => {
+  const ids = [...new Set(userIds.filter(Boolean))];
+  const profilesByUserId = new Map();
+
+  for (let offset = 0; offset < ids.length; offset += 30) {
+    const batchIds = ids.slice(offset, offset + 30);
+    const snapshot = await getDocs(query(
+      collection(db, "profiles"),
+      where("userId", "in", batchIds)
+    ));
+    snapshot.docs.forEach((profileDoc) => {
+      const profile = profileDoc.data();
+      if (!profilesByUserId.has(profile.userId)) profilesByUserId.set(profile.userId, profile);
+    });
+  }
+  return profilesByUserId;
+};
 
 // Send a friend request
 export const sendFriendRequest = async (fromUserId, toUserId) => {
   try {
     // Check if request already exists
+    if (!fromUserId || !toUserId || fromUserId === toUserId) {
+      throw new Error('A valid, different recipient is required.');
+    }
     const requestRef = firestoreDoc(db, "friendRequests", `${fromUserId}_${toUserId}`);
     await setDoc(requestRef, {
       fromUserId,
@@ -39,23 +60,11 @@ export const getPendingRequests = async (userId) => {
       where("status", "==", "pending")
     );
     const snapshot = await getDocs(q);
-
-    const pendingRequests = await Promise.all(
-      snapshot.docs.map(async (doc) => {
-        const requestData = doc.data();
-
-        const profileRef = firestoreDoc(db, "profiles", requestData.fromUserId);
-        const profile = await getDoc(profileRef);
-
-        return {
-          id: doc.id,
-          ...requestData,
-          profileData: profile.exists() ? profile.data() : null,
-        };
-      })
-    );
-
-    return pendingRequests;
+    const profiles = await loadProfilesByUserIds(snapshot.docs.map((requestDoc) => requestDoc.data().fromUserId));
+    return snapshot.docs.map((requestDoc) => {
+      const requestData = requestDoc.data();
+      return { id: requestDoc.id, ...requestData, profileData: profiles.get(requestData.fromUserId) || null };
+    });
   } catch (error) {
     console.error("Error fetching pending requests:", error);
     throw error;
@@ -67,31 +76,24 @@ export const getPendingRequests = async (userId) => {
 export const acceptFriendRequest = async (requestId, userId, fromUserId) => {
   try {
     const requestRef = firestoreDoc(db, "friendRequests", requestId);
-
-    // 1. Create refs FIRST
     const friendRef1 = firestoreDoc(db, "friends", `${userId}_${fromUserId}`);
     const friendRef2 = firestoreDoc(db, "friends", `${fromUserId}_${userId}`);
+    return await runTransaction(db, async (transaction) => {
+      const requestSnapshot = await transaction.get(requestRef);
+      if (!requestSnapshot.exists()) throw new Error('Friend request no longer exists.');
+      const request = requestSnapshot.data();
+      if (request.fromUserId !== fromUserId || request.toUserId !== userId) {
+        throw new Error('Friend request participants do not match.');
+      }
+      if (request.status === 'accepted') return true;
+      if (request.status !== 'pending') throw new Error('Friend request is not pending.');
 
-    // 2. Prevent duplicate
-    const existing = await getDoc(friendRef1);
-    if (existing.exists()) return;
-
-    // 3. Create both sides of friendship
-    await Promise.all([
-      setDoc(friendRef1, {
-        userId,
-        friendId: fromUserId,
-        connectedAt: serverTimestamp(),
-      }),
-      setDoc(friendRef2, {
-        userId: fromUserId,
-        friendId: userId,
-        connectedAt: serverTimestamp(),
-      }),
-      deleteDoc(requestRef), // Delete the friend request
-    ]);
-
-    return true;
+      const connectedAt = serverTimestamp();
+      transaction.set(friendRef1, { userId, friendId: fromUserId, connectedAt });
+      transaction.set(friendRef2, { userId: fromUserId, friendId: userId, connectedAt });
+      transaction.update(requestRef, { status: 'accepted', updatedAt: connectedAt });
+      return true;
+    });
   } catch (error) {
     console.error("Error accepting friend request:", error);
     throw error;
@@ -119,23 +121,11 @@ export const getUserFriends = async (userId) => {
     );
 
     const snapshot = await getDocs(q);
-
-    const friends = await Promise.all(
-      snapshot.docs.map(async (friendDoc) => {
-        const friendData = friendDoc.data();
-
-        const friendProfileRef = firestoreDoc(db, "profiles", friendData.friendId);
-        const friendProfile = await getDoc(friendProfileRef);
-
-        return {
-          id: friendDoc.id,
-          ...friendData,
-          profileData: friendProfile.exists() ? friendProfile.data() : null,
-        };
-      })
-    );
-
-    return friends;
+    const profiles = await loadProfilesByUserIds(snapshot.docs.map((friendDoc) => friendDoc.data().friendId));
+    return snapshot.docs.map((friendDoc) => {
+      const friendData = friendDoc.data();
+      return { id: friendDoc.id, ...friendData, profileData: profiles.get(friendData.friendId) || null };
+    });
   } catch (error) {
     console.error("Error fetching friends:", error);
     throw error;
@@ -167,23 +157,11 @@ export const getSentRequests = async (userId) => {
       where("fromUserId", "==", userId),
     );
     const snapshot = await getDocs(q);
-    
-    const sentRequests = await Promise.all(
-      snapshot.docs.map(async (doc) => {
-        const requestData = doc.data();
-
-        const profileRef = firestoreDoc(db, "profiles", requestData.toUserId);
-        const profile = await getDoc(profileRef);
-
-        return {
-          id: doc.id,
-          ...requestData,
-          profileData: profile.exists() ? profile.data() : null,
-        };
-      })
-    );
-
-    return sentRequests;
+    const profiles = await loadProfilesByUserIds(snapshot.docs.map((requestDoc) => requestDoc.data().toUserId));
+    return snapshot.docs.map((requestDoc) => {
+      const requestData = requestDoc.data();
+      return { id: requestDoc.id, ...requestData, profileData: profiles.get(requestData.toUserId) || null };
+    });
   } catch (error) {
     console.error("Error fetching sent requests:", error);
     throw error;

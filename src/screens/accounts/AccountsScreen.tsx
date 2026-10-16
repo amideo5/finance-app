@@ -1,32 +1,38 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } from 'react-native';
-import { useRouter } from 'expo-router';
 import AccountCard from '@/src/components/finance/AccountCard';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
+import { getAccounts } from '@/src/services/firebase/accountsService';
+import { FinanceAccount } from '@/types/finance';
+import { useRouter } from 'expo-router';
 import { Plus } from 'lucide-react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { Alert, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 export default function AccountsScreen() {
   const router = useRouter();
   const { currentProfile } = useProfile();
-  const [accounts, setAccounts] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<FinanceAccount[]>([]);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (currentProfile) {
-      loadAccounts();
-    }
-  }, [currentProfile]);
-
-  const loadAccounts = async () => {
+  const loadAccounts = useCallback(async () => {
     if (!currentProfile) return;
 
     setLoading(true);
-    
-    const data = null;;
-    setAccounts(data != null ? data : []);
-    setLoading(false);
-  };
+    try {
+      setAccounts(await getAccounts(currentProfile.id) as FinanceAccount[]);
+    } catch (error) {
+      console.error('Error loading accounts:', error);
+      Alert.alert('Error', 'Could not load accounts. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }, [currentProfile]);
+
+  useEffect(() => {
+    // Load the selected profile's accounts when the active profile changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadAccounts();
+  }, [loadAccounts]);
 
   return (
     <View style={styles.container}>
@@ -52,9 +58,14 @@ export default function AccountsScreen() {
             name={account.name}
             type={account.type}
             balance={account.balance}
-            accountNumber={account.account_number}
+            accountNumber={account.account_number ?? undefined}
           />
         ))}
+        {accounts.length === 0 && !loading && (
+          <Text style={{ color: colors.textSecondary, textAlign: 'center', marginTop: 32 }}>
+            No accounts yet. Add one to start tracking balances.
+          </Text>
+        )}
       </ScrollView>
     </View>
   );

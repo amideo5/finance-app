@@ -1,24 +1,23 @@
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { db } from '@/src/firebaseConfig';
 import {
-    getSentRequests,
-    getUserFriends,
-    sendFriendRequest,
+  getSentRequests,
+  getUserFriends,
+  sendFriendRequest,
 } from '@/src/services/firebase/friendsService';
+import { searchProfilesByName } from '@/src/services/firebase/profilesService';
 import { useRouter } from 'expo-router';
-import { collection, getDocs } from 'firebase/firestore';
 import { ArrowLeft, CheckCircle, Clock, Search } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 
 export default function AddFriendScreen() {
@@ -31,14 +30,7 @@ export default function AddFriendScreen() {
   const [existingFriends, setExistingFriends] = useState<string[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
 
-  // Load existing friends and sent requests on mount
-  useEffect(() => {
-    if (currentProfile?.userId) {
-      loadInitialData();
-    }
-  }, [currentProfile?.userId]);
-
-  const loadInitialData = async () => {
+  const loadInitialData = useCallback(async () => {
     if (!currentProfile?.userId) return;
 
     try {
@@ -59,7 +51,13 @@ export default function AddFriendScreen() {
     } finally {
       setInitialLoading(false);
     }
-  };
+  }, [currentProfile]);
+
+  useEffect(() => {
+    // This fetch synchronizes remote profile data when the active profile changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadInitialData();
+  }, [loadInitialData]);
 
   const handleSearch = async (text: string) => {
     setSearchQuery(text);
@@ -71,23 +69,9 @@ export default function AddFriendScreen() {
 
     setLoading(true);
     try {
-      // Fetch all profiles (or use a range query for performance)
-      const usersRef = collection(db, 'profiles');
-      const snapshot = await getDocs(usersRef);
-      const searchLower = text.toLowerCase();
-      const results = snapshot.docs
-        .map((doc) => ({
-          id: doc.id,
-          userId: doc.data().userId,
-          name: doc.data().name,
-          ...doc.data(),
-        }))
-        .filter((profile) => {
-          if (profile.userId === currentProfile?.userId) return false;
-          if (!profile.name) return false;
-          // Case-insensitive, partial match (at least 2 letters)
-          return profile.name.toLowerCase().includes(searchLower) && searchLower.length >= 2;
-        });
+      const results = (await searchProfilesByName(text) as any[]).filter((profile) =>
+        profile.userId !== currentProfile?.userId && Boolean(profile.name)
+      );
 
       setSearchResults(results);
     } catch (error) {
@@ -103,7 +87,7 @@ export default function AddFriendScreen() {
 
     try {
       await sendFriendRequest(currentProfile.userId, userId);
-      setSentRequests([...sentRequests, userId]);
+      setSentRequests((previous) => [...previous, userId]);
       Alert.alert('Success', `Friend request sent to ${name}`);
     } catch (error) {
       console.error('Error sending friend request:', error);
@@ -153,8 +137,6 @@ export default function AddFriendScreen() {
 
         {searchResults.map((user) => {
           const status = getButtonStatus(user.userId);
-          const isDisabled = status === 'friend' || status === 'requested';
-
           return (
             <View key={user.id} style={styles.userCard}>
               <View style={styles.userInfo}>

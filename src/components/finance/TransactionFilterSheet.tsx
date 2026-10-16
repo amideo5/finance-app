@@ -1,18 +1,19 @@
-import React, { useState } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Modal,
-  ScrollView,
+    EXPENSE_CATEGORIES,
+    INCOME_CATEGORIES,
+} from '@/src/constants/categories';
+import { colors } from '@/src/constants/colors';
+import { toLocalDateKey } from '@/src/utils/validation';
+import { useState } from 'react';
+import {
+    Modal,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { Calendar } from 'react-native-calendars';
-import { colors } from '@/src/constants/colors';
-import {
-  EXPENSE_CATEGORIES,
-  INCOME_CATEGORIES,
-} from '@/src/constants/categories';
 
 interface Props {
   visible: boolean;
@@ -110,8 +111,8 @@ export default function TransactionFilterSheet({
     const start = new Date();
     start.setDate(end.getDate() - days);
 
-    setStartDate(start.toISOString().split('T')[0]);
-    setEndDate(end.toISOString().split('T')[0]);
+    setStartDate(toLocalDateKey(start));
+    setEndDate(toLocalDateKey(end));
   };
 
   return (
@@ -232,8 +233,8 @@ export default function TransactionFilterSheet({
                 onApply({
                   type,
                   categories: selectedCategories,
-                  startDate: startDate ? new Date(startDate) : null,
-                  endDate: endDate ? new Date(endDate) : null,
+                  startDate,
+                  endDate,
                 });
                 onClose();
               }}

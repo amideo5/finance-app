@@ -5,17 +5,22 @@ import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import { db } from '@/src/firebaseConfig';
 import { generateInsights, Insight } from '@/src/services/ai/insightsEngine';
+import { getUserSplits } from '@/src/services/firebase/splitService';
 import { formatCurrency } from '@/src/utils/format';
+import { getExcludedSourceAmountInPaise, getReportableTransactions } from '@/src/utils/splitReporting';
+import { toLocalDateKey } from '@/src/utils/validation';
 import { useRouter } from 'expo-router';
 import {
   collection,
+  getAggregateFromServer,
   getDocs,
   orderBy,
   query,
+  sum,
   where,
 } from 'firebase/firestore';
 import { Plus } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 export default function DashboardScreen() {
@@ -27,15 +32,11 @@ export default function DashboardScreen() {
   const [monthlyExpense, setMonthlyExpense] = useState(0);
   const [recentTransactions, setRecentTransactions] = useState<any[]>([]);
   const [insights, setInsights] = useState<Insight[]>([]);
+  const requestVersion = useRef(0);
 
-  useEffect(() => {
-    if (currentProfile) {
-      loadDashboardData();
-    }
-  }, [currentProfile]);
-
-  const loadDashboardData = async () => {
+  const loadDashboardData = useCallback(async () => {
     if (!currentProfile) return;
+    const requestId = ++requestVersion.current;
 
     setLoading(true);
 
@@ -44,93 +45,107 @@ export default function DashboardScreen() {
       const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
       const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-      // Fetch all transactions to calculate total balance
-      const allTransactionsSnapshot = await getDocs(
-        collection(db, 'profiles', currentProfile.id, 'transactions')
-      );
-      const allTransactions: any[] = [];
-      allTransactionsSnapshot.forEach((doc) => {
-        allTransactions.push({ id: doc.id, ...doc.data() });
-      });
+      const transactionCollection = collection(db, 'profiles', currentProfile.id, 'transactions');
+      const firstDayKey = toLocalDateKey(firstDay);
+      const lastDayKey = toLocalDateKey(lastDay);
+      const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const previousMonthLast = new Date(now.getFullYear(), now.getMonth(), 0);
+      const previousStartKey = toLocalDateKey(previousMonth);
+      const previousEndKey = toLocalDateKey(previousMonthLast);
 
-      // Calculate total balance: income - expenses
-      const totalIncome = allTransactions
-        .filter(t => t.type === 'income')
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-
-      const totalExpense = allTransactions
-        .filter(t => t.type === 'expense')
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-
-      const totalBalance = totalIncome - totalExpense;
-      setBalance(totalBalance);
-
-      // Fetch current month transactions
-      const transactionsSnapshot = await getDocs(
-        query(
-          collection(db, 'profiles', currentProfile.id, 'transactions'),
-          where('date', '>=', firstDay.toISOString().split('T')[0]),
-          where('date', '<=', lastDay.toISOString().split('T')[0]),
+      const [incomeTotalSnapshot, expenseTotalSnapshot, repaymentSnapshot, monthSnapshot, previousSnapshot, budgetsSnapshot, splits] = await Promise.all([
+        getAggregateFromServer(query(transactionCollection, where('type', '==', 'income')), { total: sum('amount') }),
+        getAggregateFromServer(query(transactionCollection, where('type', '==', 'expense')), { total: sum('amount') }),
+        getDocs(query(transactionCollection, where('kind', '==', 'repayment'))),
+        getDocs(query(
+          transactionCollection,
+          where('date', '>=', firstDayKey),
+          where('date', '<=', lastDayKey),
           orderBy('date', 'desc')
-        )
-      );
-      const transactions: any[] = [];
-      transactionsSnapshot.forEach((doc) => {
-        transactions.push({ id: doc.id, ...doc.data() });
-      });
+        )),
+        getDocs(query(
+          transactionCollection,
+          where('date', '>=', previousStartKey),
+          where('date', '<=', previousEndKey)
+        )),
+        getDocs(collection(db, 'profiles', currentProfile.id, 'budgets')),
+        getUserSplits(currentProfile.userId),
+      ]);
+      if (requestId !== requestVersion.current) return;
 
-      const income = transactions
+      const repayments = repaymentSnapshot.docs.map((transactionDoc) => transactionDoc.data());
+      const repaymentIncomePaise = repayments
+        .filter((transaction) => transaction.type === 'income')
+        .reduce((sum, transaction) => sum + (Number.isSafeInteger(transaction.amountInPaise)
+          ? transaction.amountInPaise : Math.round(Number(transaction.amount || 0) * 100)), 0);
+      const repaymentExpensePaise = repayments
+        .filter((transaction) => transaction.type === 'expense')
+        .reduce((sum, transaction) => sum + (Number.isSafeInteger(transaction.amountInPaise)
+          ? transaction.amountInPaise : Math.round(Number(transaction.amount || 0) * 100)), 0);
+      const excludedSourcePaise = getExcludedSourceAmountInPaise(splits, currentProfile.id);
+      const incomeTotalPaise = Math.round(Number(incomeTotalSnapshot.data().total || 0) * 100) - repaymentIncomePaise;
+      const expenseTotalPaise = Math.round(Number(expenseTotalSnapshot.data().total || 0) * 100)
+        - repaymentExpensePaise - excludedSourcePaise;
+      setBalance((incomeTotalPaise - expenseTotalPaise) / 100);
+
+      const transactions = monthSnapshot.docs.map((transactionDoc) => ({
+        id: transactionDoc.id,
+        ...transactionDoc.data(),
+      })) as any[];
+
+      const reportableMonth = getReportableTransactions(transactions, splits, currentProfile.id);
+      const income = reportableMonth
         .filter(t => t.type === 'income')
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+        .reduce((sum, t) => sum + Math.round(Number(t.amount || 0) * 100), 0) / 100;
 
-      const expense = transactions
+      const expense = reportableMonth
         .filter(t => t.type === 'expense')
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+        .reduce((sum, t) => sum + Math.round(Number(t.amount || 0) * 100), 0) / 100;
 
       setMonthlyIncome(income);
       setMonthlyExpense(expense);
 
-      const recent = transactions.slice(0, 5);
+      const recent = transactions.slice(0, 5).map((transaction) => ({
+        ...transaction,
+        kind: transaction.kind || (splits.some((split) =>
+          split.sourceProfileId === currentProfile.id && split.sourceTransactionId === transaction.id
+        ) ? 'source' : undefined),
+      }));
       setRecentTransactions(recent);
 
-      // Fetch previous month transactions for insights
-      const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const previousMonthLast = new Date(now.getFullYear(), now.getMonth(), 0);
-
-      const previousTransactionsSnapshot = await getDocs(
-        query(
-          collection(db, 'profiles', currentProfile.id, 'transactions'),
-          where('date', '>=', previousMonth.toISOString().split('T')[0]),
-          where('date', '<=', previousMonthLast.toISOString().split('T')[0])
-        )
-      );
-      const previousTransactions: any[] = [];
-      previousTransactionsSnapshot.forEach((doc) => {
-        previousTransactions.push({ id: doc.id, ...doc.data() });
-      });
-
-      // Fetch budgets
-      const budgetsSnapshot = await getDocs(
-        collection(db, 'profiles', currentProfile.id, 'budgets')
-      );
-      const budgets: any[] = [];
-      budgetsSnapshot.forEach((doc) => {
-        budgets.push({ id: doc.id, ...doc.data() });
-      });
+      const previousTransactions = previousSnapshot.docs.map((transactionDoc) => ({
+        id: transactionDoc.id,
+        ...transactionDoc.data(),
+      })) as any[];
+      const reportablePreviousMonth = getReportableTransactions(previousTransactions, splits, currentProfile.id);
+      const budgets = budgetsSnapshot.docs.map((budgetDoc) => ({
+        id: budgetDoc.id,
+        ...budgetDoc.data(),
+      })) as any[];
 
       const generatedInsights = generateInsights(
-        transactions,
+        reportableMonth,
         budgets,
-        previousTransactions
+        reportablePreviousMonth
       );
 
       setInsights(generatedInsights);
     } catch (error) {
       console.error('Error loading dashboard data:', error);
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
-  };
+  }, [currentProfile]);
+
+  useEffect(() => {
+    if (currentProfile) {
+      // Refresh dashboard values from Firestore for the active profile.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadDashboardData();
+    } else {
+      requestVersion.current += 1;
+    }
+  }, [currentProfile, loadDashboardData]);
 
   const onRefresh = () => {
     loadDashboardData();
@@ -205,6 +220,7 @@ export default function DashboardScreen() {
               key={transaction.id}
               type={transaction.type}
               category={transaction.category || 'Unknown'}
+              kind={transaction.kind}
               amount={transaction.amount}
               date={transaction.date}
               notes={transaction.notes}
