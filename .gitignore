@@ -1,35 +1,90 @@
-# dependencies
+# -------------------------------------------------------------------
+# React Native & JavaScript Dependencies
+# -------------------------------------------------------------------
 node_modules/
+.npm/
+package-lock.json
+yarn-error.log*
+npm-debug.log*
+yarn-debug.log*
 
-# expo
+# -------------------------------------------------------------------
+# Android Native Configs & Build Outputs
+# -------------------------------------------------------------------
+android/app/build/
+android/build/
+android/.gradle/
+.gradle/
+local.properties
+*.iml
+
+# Android Keystores (Uncomment if you store them inside the project, but NEVER commit production keys)
+# *.jks
+# *.keystore
+# !android/app/debug.keystore
+
+# -------------------------------------------------------------------
+# iOS Native Configs & Build Outputs
+# -------------------------------------------------------------------
+ios/DerivedData/
+ios/build/
+ios/Pods/
+ios/Podfile.lock
+.xcode.env.local
+
+# Xcode user-specific settings
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+*.xcworkspace
+!ios/*.xcworkspace/contents.xcworkspacedata # Keep the workspace structure, ignore the user data
+
+# -------------------------------------------------------------------
+# Expo (If using Expo / Expo Prebuild)
+# -------------------------------------------------------------------
 .expo/
 dist/
 web-build/
 expo-env.d.ts
 
-# native
-*.orig.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-
-# metro
+# -------------------------------------------------------------------
+# Bundlers, Tools, and Caching
+# -------------------------------------------------------------------
 .metro-health-check*
+.buckd/
+buck-out/
+.watchmanconfig
+.eslintcache
+*.tsbuildinfo
 
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
-
-# macos
-.DS_Store
+# -------------------------------------------------------------------
+# Environment Variables & Secrets (Crucial for Security)
+# -------------------------------------------------------------------
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 *.pem
 
-# local env files
-.env*.local
-.env
+# -------------------------------------------------------------------
+# Operating Systems & IDEs
+# -------------------------------------------------------------------
+# macOS
+.DS_Store
+._*
 
-# typescript
-*.tsbuildinfo
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

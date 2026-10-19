@@ -1,7 +1,13 @@
 import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
-import { httpsCallable } from 'firebase/functions';
-import type { SharedExpenseSplit, SplitParticipant, SplitSettlement } from '@/types/finance';
-import { db, functions } from '@/src/firebaseConfig';
+import type {
+  SharedExpenseSplit,
+  SplitParticipant,
+  SplitSettlement,
+} from '@/types/finance';
+import { auth, db } from '@/src/firebaseConfig';
+
+const SUPABASE_SPLIT_FUNCTION_URL =
+  process.env.EXPO_PUBLIC_SUPABASE_SPLIT_FUNCTION_URL;
 
 interface CreateSplitPayload {
   sourceProfileId: string;
@@ -12,11 +18,54 @@ interface CreateSplitPayload {
   participants: SplitParticipant[];
 }
 
-const callable = <TInput, TOutput>(name: string) => httpsCallable<TInput, TOutput>(functions, name);
+async function callSupabaseSplitFunction<TOutput>(
+  route: string,
+  payload: Record<string, unknown>,
+): Promise<TOutput> {
+  const user = auth.currentUser;
+
+  if (!user) {
+    throw new Error('You must be signed in to perform this action.');
+  }
+
+  if (!SUPABASE_SPLIT_FUNCTION_URL) {
+    throw new Error('Supabase split function URL is not configured.');
+  }
+
+  // Firebase Auth token: Supabase Edge Function verifies this server-side.
+  const firebaseIdToken = await user.getIdToken();
+
+  const response = await fetch(
+    `${SUPABASE_SPLIT_FUNCTION_URL.replace(/\/$/, '')}/${route}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-firebase-id-token': firebaseIdToken,
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  const responseBody = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      responseBody?.error ??
+        `Supabase split request failed with status ${response.status}`,
+    );
+  }
+
+  return responseBody as TOutput;
+}
 
 export async function createSplit(payload: CreateSplitPayload): Promise<string> {
-  const result = await callable<CreateSplitPayload, { splitId: string }>('createSharedExpense')(payload);
-  return result.data.splitId;
+  const result = await callSupabaseSplitFunction<{ splitId: string }>(
+    'create-shared-expense',
+    payload,
+  );
+
+  return result.splitId;
 }
 
 export async function getUserSplits(userId: string): Promise<SharedExpenseSplit[]> {
@@ -24,28 +73,53 @@ export async function getUserSplits(userId: string): Promise<SharedExpenseSplit[
     getDocs(query(collection(db, 'splits'), where('participantIds', 'array-contains', userId))),
     getDocs(query(collection(db, 'splits'), where('createdBy', '==', userId))),
   ]);
+
   const unique = new Map<string, SharedExpenseSplit>();
+
   for (const snapshot of [participantSnapshot, creatorSnapshot]) {
     snapshot.docs.forEach((splitDoc) => {
       const data = splitDoc.data();
-      if (data.currency !== 'INR' || !Array.isArray(data.participants) || !Number.isSafeInteger(data.totalAmountInPaise)) return;
+
+      if (
+        data.currency !== 'INR' ||
+        !Array.isArray(data.participants) ||
+        !Number.isSafeInteger(data.totalAmountInPaise)
+      ) {
+        return;
+      }
+
       unique.set(splitDoc.id, { id: splitDoc.id, ...data } as SharedExpenseSplit);
     });
   }
+
   return [...unique.values()];
 }
 
 export async function getSplit(splitId: string): Promise<SharedExpenseSplit | null> {
   const snapshot = await getDoc(doc(db, 'splits', splitId));
+
   if (!snapshot.exists()) return null;
+
   const data = snapshot.data();
-  if (data.currency !== 'INR' || !Array.isArray(data.participants) || !Number.isSafeInteger(data.totalAmountInPaise)) return null;
+
+  if (
+    data.currency !== 'INR' ||
+    !Array.isArray(data.participants) ||
+    !Number.isSafeInteger(data.totalAmountInPaise)
+  ) {
+    return null;
+  }
+
   return { id: snapshot.id, ...data } as SharedExpenseSplit;
 }
 
 export async function getSplitSettlements(splitId: string): Promise<SplitSettlement[]> {
   const snapshot = await getDocs(collection(db, 'splits', splitId, 'settlements'));
-  return snapshot.docs.map((settlementDoc) => ({ id: settlementDoc.id, ...settlementDoc.data() } as SplitSettlement));
+
+  return snapshot.docs.map(
+    (settlementDoc) =>
+      ({ id: settlementDoc.id, ...settlementDoc.data() }) as SplitSettlement,
+  );
 }
 
 export async function requestRepayment(input: {
@@ -54,22 +128,48 @@ export async function requestRepayment(input: {
   senderProfileId: string;
   idempotencyKey: string;
 }): Promise<string> {
-  const result = await callable<typeof input, { settlementId: string }>('requestSplitRepayment')(input);
-  return result.data.settlementId;
+  const result = await callSupabaseSplitFunction<{ settlementId: string }>(
+    'request-split-repayment',
+    input,
+  );
+
+  return result.settlementId;
 }
 
-export async function acceptRepayment(input: { splitId: string; settlementId: string; recipientProfileId: string }): Promise<void> {
-  await callable<typeof input, { accepted: boolean }>('acceptSplitRepayment')(input);
+export async function acceptRepayment(input: {
+  splitId: string;
+  settlementId: string;
+  recipientProfileId: string;
+}): Promise<void> {
+  await callSupabaseSplitFunction<{ accepted: boolean; finalized?: boolean }>(
+    'accept-split-repayment',
+    input,
+  );
 }
 
-export async function rejectRepayment(input: { splitId: string; settlementId: string }): Promise<void> {
-  await callable<typeof input, { rejected: boolean }>('rejectSplitRepayment')(input);
+export async function rejectRepayment(input: {
+  splitId: string;
+  settlementId: string;
+}): Promise<void> {
+  await callSupabaseSplitFunction<{ rejected: boolean }>(
+    'reject-split-repayment',
+    input,
+  );
 }
 
-export async function cancelRepayment(input: { splitId: string; settlementId: string }): Promise<void> {
-  await callable<typeof input, { cancelled: boolean }>('cancelSplitRepayment')(input);
+export async function cancelRepayment(input: {
+  splitId: string;
+  settlementId: string;
+}): Promise<void> {
+  await callSupabaseSplitFunction<{ cancelled: boolean }>(
+    'cancel-split-repayment',
+    input,
+  );
 }
 
 export async function cancelSplit(splitId: string): Promise<void> {
-  await callable<{ splitId: string }, { cancelled: boolean }>('cancelSharedExpense')({ splitId });
+  await callSupabaseSplitFunction<{ cancelled: boolean }>(
+    'cancel-shared-expense',
+    { splitId },
+  );
 }

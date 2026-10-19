@@ -12,5 +12,9 @@
     ".expo/types/**/*.ts",
     "expo-env.d.ts",
     "nativewind-env.d.ts"
-, "src/services/firebase/splitService.ts"  ]
+, "src/services/firebase/splitService.ts"  ],
+"exclude": [
+    "supabase/functions/**",
+    "node_modules"
+  ]
 }
