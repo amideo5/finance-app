@@ -10,20 +10,20 @@ export function getReportableTransactions(
   splits: SharedExpenseSplit[],
   profileId: string,
 ): FinanceTransaction[] {
-  const sourceTransactionsToExclude = new Set<string>();
-  for (const split of splits) {
-    if (split.status === 'cancelled') continue;
-    if (split.sourceProfileId !== profileId) continue;
-    const creatorIsParticipant = split.participants.some((participant) => participant.userId === split.paidByUserId);
-    if (!creatorIsParticipant || split.finalizationStatus === 'complete') {
-      sourceTransactionsToExclude.add(split.sourceTransactionId);
-    }
-  }
+  // const sourceTransactionsToExclude = new Set<string>();
+  // for (const split of splits) {
+  //   if (split.status === 'cancelled') continue;
+  //   if (split.sourceProfileId !== profileId) continue;
+  //   const creatorIsParticipant = split.participants.some((participant) => participant.userId === split.paidByUserId);
+  //   if (!creatorIsParticipant || split.finalizationStatus === 'complete') {
+  //     sourceTransactionsToExclude.add(split.sourceTransactionId);
+  //   }
+  // }
 
   return transactions.filter((transaction) => {
     if (transaction.profileId && transaction.profileId !== profileId) return false;
-    if (transaction.kind === 'repayment') return false;
-    if (sourceTransactionsToExclude.has(transaction.id)) return false;
+    // if (transaction.kind === 'repayment') return false;
+    // if (sourceTransactionsToExclude.has(transaction.id)) return false;
     return true;
   }).map((transaction) => transaction.kind === 'allocation'
     ? {

@@ -155,6 +155,7 @@ export const getSentRequests = async (userId) => {
     const q = query(
       collection(db, "friendRequests"),
       where("fromUserId", "==", userId),
+      where("status", "==", "pending")
     );
     const snapshot = await getDocs(q);
     const profiles = await loadProfilesByUserIds(snapshot.docs.map((requestDoc) => requestDoc.data().toUserId));
