@@ -14,7 +14,7 @@ export default function SettingsScreen() {
 
   const handleSignOut = () => {
     Alert.alert(
-      'Sign Out',
+      'Sign Out TEST',
       'Are you sure you want to sign out?',
       [
         { text: 'Cancel', style: 'cancel' },
