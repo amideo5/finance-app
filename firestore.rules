@@ -225,6 +225,13 @@ service cloud.firestore {
       }
     }
 
+    match /friendSettlements/{settlementId} {
+      // Client reads only requests in which the signed-in user is a participant.
+      // All writes are performed by the authenticated Supabase Edge Function.
+      allow read: if signedIn() && request.auth.uid in resource.data.participantIds;
+      allow create, update, delete: if false;
+    }
+
     match /splitSourceLocks/{profileId}/transactions/{transactionId} {
       allow read, create, update, delete: if false;
     }

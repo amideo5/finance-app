@@ -92,6 +92,7 @@ export default function SplitDetail() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <View style={styles.spacer} />
       <TouchableOpacity onPress={() => router.back()}><Text style={styles.back}>← Back</Text></TouchableOpacity>
       <Text style={styles.title}>{split.title}</Text>
       {split.description ? <Text style={styles.sub}>{split.description}</Text> : null}
@@ -99,7 +100,7 @@ export default function SplitDetail() {
         <Text style={styles.label}>Original expense</Text>
         <Text style={styles.amount}>{money(split.totalAmountInPaise)}</Text>
         <Text style={styles.sub}>Paid by {split.createdBy === userId ? 'you' : 'the original payer'} · {split.sourceDate}</Text>
-        <Text style={styles.status}>{split.status.replaceAll('_', ' ')}</Text>
+        {/* <Text style={styles.status}>{split.status.replaceAll('_', ' ')}</Text> */}
       </View>
       {isCreditor && split.status !== 'cancelled' && split.finalizationStatus !== 'complete' && (
         <TouchableOpacity disabled={busy} style={styles.secondaryButton} onPress={() => Alert.alert(
@@ -121,9 +122,9 @@ export default function SplitDetail() {
           <View key={participant.userId} style={styles.row}>
             <View style={{ flex: 1 }}>
               <Text style={styles.person}>{participant.displayName || (participant.userId === split.paidByUserId ? 'Payer' : participant.userId)}</Text>
-              {obligation ? (
+              {/* {obligation ? (
                 <Text style={styles.sub}>Accepted {money(obligation.acceptedAmountInPaise)} · pending {money(obligation.pendingAmountInPaise)} · outstanding {money(obligation.amountInPaise - obligation.acceptedAmountInPaise)}</Text>
-              ) : <Text style={styles.sub}>{participant.userId === split.paidByUserId ? 'Original payer · no self-repayment' : 'No repayment obligation'}</Text>}
+              ) : <Text style={styles.sub}>{participant.userId === split.paidByUserId ? 'Original payer · no self-repayment' : 'No repayment obligation'}</Text>} */}
             </View>
             <Text style={styles.value}>{money(participant.shareAmountInPaise)}</Text>
           </View>
@@ -135,11 +136,11 @@ export default function SplitDetail() {
 
       {myObligations.length > 0 && (
         <View style={styles.card}>
-          <Text style={styles.heading}>Your outstanding obligation</Text>
+          <Text style={styles.heading}>Your outstanding obligation in this split</Text>
           <Text style={styles.amount}>{money(outstanding)}</Text>
         </View>
       )}
-      {!isCreditor && outstanding > 0 && (
+      {/* {!isCreditor && outstanding > 0 && (
         <View style={styles.card}>
           <Text style={styles.heading}>Acknowledge a repayment</Text>
           <Text style={styles.sub}>This is a user-reported payment. It affects the balance only after the creditor accepts.</Text>
@@ -148,9 +149,9 @@ export default function SplitDetail() {
             <Text style={styles.buttonText}>Send acknowledgment</Text>
           </TouchableOpacity>
         </View>
-      )}
+      )} */}
 
-      {pendingForMe.length > 0 && <>
+      {/* {pendingForMe.length > 0 && <>
         <Text style={styles.heading}>Awaiting your decision</Text>
         {pendingForMe.map((settlement) => (
           <View key={settlement.id} style={styles.card}>
@@ -168,9 +169,9 @@ export default function SplitDetail() {
           <Text style={styles.sub}>Pending acknowledgment: {money(settlement.amountInPaise)}</Text>
           <TouchableOpacity disabled={busy} onPress={() => void act(() => cancelRepayment({ splitId: split.id, settlementId: settlement.id }), 'Acknowledgment cancelled.')}><Text style={styles.danger}>Cancel acknowledgment</Text></TouchableOpacity>
         </View>
-      ))}
+      ))} */}
 
-      <Text style={styles.heading}>Payment history</Text>
+      {/* <Text style={styles.heading}>Payment history</Text>
       {settlements.length === 0 ? <Text style={styles.sub}>No repayment acknowledgments yet.</Text> : settlements.map((settlement) => (
         <View key={settlement.id} style={styles.row}>
           <View style={{ flex: 1 }}>
@@ -179,7 +180,7 @@ export default function SplitDetail() {
           </View>
           <Text style={styles.value}>{money(settlement.amountInPaise)}</Text>
         </View>
-      ))}
+      ))} */}
       {split.finalizationStatus === 'complete' && <Text style={styles.complete}>Final participant expense allocations are recorded.</Text>}
     </ScrollView>
   );
@@ -211,4 +212,7 @@ const styles = StyleSheet.create({
   actions: { flexDirection: 'row', gap: 10, marginTop: 12 },
   danger: { color: colors.expense, fontWeight: '600', paddingTop: 10 },
   complete: { color: colors.income, fontWeight: '700', marginTop: 18 },
+  spacer: {
+    height: 50, // React Native uses density-independent pixels (dp), do not use '50px' strings
+  },
 });

@@ -158,7 +158,7 @@ async function getGoogleAccessToken(): Promise<string> {
 
 type FirestoreDocument = {
   name?: string;
-  fields?: Record<string, unknown>;
+  fields?: Record<string, FsValue>;
   createTime?: string;
   updateTime?: string;
 };
@@ -510,6 +510,763 @@ function createObligations(
     }));
 }
 
+// -----------------------------------------------------------------------------
+// Friend-level net settlements
+// Collection: friendSettlements/{settlementId}
+// These payments affect the combined balance between two friends. They do not
+// mark individual shared-expense splits as paid.
+// -----------------------------------------------------------------------------
+
+type FriendSettlementStatus =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "cancelled";
+
+type FriendSettlementRecord = {
+  fromUserId: string;
+  toUserId: string;
+  participantIds: string[];
+  amountInPaise: number;
+  status: FriendSettlementStatus;
+  idempotencyKey: string;
+  fromProfileId: string;
+  fromAccountId: string;
+  note?: string;
+  createdAt: string;
+  acceptedAt?: string;
+  rejectedAt?: string;
+  cancelledAt?: string;
+};
+
+async function queryFirestoreCollectionInTransaction(
+  collectionId: string,
+  fieldPath: string,
+  operator: "EQUAL" | "ARRAY_CONTAINS",
+  value: unknown,
+  transactionId: string,
+): Promise<FsDoc[]> {
+  const result = await firestoreRequest<Array<{ document?: FsDoc }>>(
+    ":runQuery",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath },
+              op: operator,
+              value: fsEncode(value),
+            },
+          },
+        },
+        transaction: transactionId,
+      }),
+    },
+  );
+
+  return result.flatMap((row) => row.document ? [row.document] : []);
+}
+
+
+async function queryEntireCollectionInTransaction(
+  collectionId: string,
+  transactionId: string,
+): Promise<FsDoc[]> {
+  const result = await firestoreRequest<Array<{ document?: FsDoc }>>(
+    ":runQuery",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        structuredQuery: { from: [{ collectionId }] },
+        transaction: transactionId,
+      }),
+    },
+  );
+  return result.flatMap((row) => row.document ? [row.document] : []);
+}
+
+
+const SETTLEMENT_LEDGER_LOCK_PATH = "systemLocks/settlementLedger";
+
+function settlementLedgerLockWrite(lockDoc: FsDoc | null): Record<string, unknown> {
+  return {
+    update: {
+      name: fsDocumentName(SETTLEMENT_LEDGER_LOCK_PATH),
+      fields: {
+        lastOperationAt: fsEncode(new Date().toISOString()),
+        operationId: fsEncode(crypto.randomUUID()),
+      },
+    },
+    updateMask: { fieldPaths: ["lastOperationAt", "operationId"] },
+    currentDocument: lockDoc ? { exists: true } : { exists: false },
+  };
+}
+
+/**
+ * Calculate the app-wide net balances from all active split obligations and
+ * accepted friend-level payments. Negative means the user owes; positive means
+ * the user should receive. Pending items are not booked as payments.
+ */
+async function getNetworkNetBalancesInTransaction(
+  transactionId: string,
+): Promise<Record<string, number>> {
+  const [splitDocs, friendSettlementDocs] = await Promise.all([
+    queryEntireCollectionInTransaction("splits", transactionId),
+    queryEntireCollectionInTransaction("friendSettlements", transactionId),
+  ]);
+  const balances: Record<string, number> = {};
+  const adjust = (userId: string, delta: number) => {
+    balances[userId] = (balances[userId] ?? 0) + delta;
+  };
+
+  for (const doc of splitDocs) {
+    const split = fsDocData(doc);
+    if (split.status === "cancelled") continue;
+    const obligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>>
+      : [];
+    for (const obligation of obligations) {
+      const from = typeof obligation.fromUserId === "string" ? obligation.fromUserId : "";
+      const to = typeof obligation.toUserId === "string" ? obligation.toUserId : "";
+      if (!from || !to || from === to) throw new Error("A split contains an invalid obligation");
+      const total = assertPaise(obligation.amountInPaise, "Split obligation", true);
+      const accepted = assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
+      if (accepted > total) throw new Error("Accepted split repayments exceed an obligation");
+      const outstanding = total - accepted;
+      if (outstanding > 0) {
+        adjust(from, -outstanding);
+        adjust(to, outstanding);
+      }
+    }
+  }
+
+  for (const doc of friendSettlementDocs) {
+    const settlement = fsDocData(doc);
+    if (settlement.status !== "accepted") continue;
+    const from = assertId(settlement.fromUserId, "Friend settlement sender");
+    const to = assertId(settlement.toUserId, "Friend settlement recipient");
+    if (from === to) throw new Error("A friend settlement cannot involve the same user twice");
+    const amount = assertPaise(settlement.amountInPaise, "Accepted friend settlement");
+    // Paying reduces the sender's debt and the recipient's credit.
+    adjust(from, amount);
+    adjust(to, -amount);
+  }
+
+  const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
+  if (total !== 0) throw new Error(`The network ledger does not reconcile (${total} paise)`);
+  return balances;
+}
+
+/** Canonical undirected key for an accepted friendship. */
+function friendshipKey(userA: string, userB: string): string {
+  return [userA, userB].sort().join("\u0000");
+}
+
+async function getAcceptedFriendshipKeysInTransaction(transactionId: string): Promise<Set<string>> {
+  const docs = await queryEntireCollectionInTransaction("friends", transactionId);
+  const keys = new Set<string>();
+  for (const doc of docs) {
+    const data = fsDocData(doc);
+    const userId = typeof data.userId === "string" ? data.userId : "";
+    const friendId = typeof data.friendId === "string" ? data.friendId : "";
+    if (userId && friendId && userId !== friendId) keys.add(friendshipKey(userId, friendId));
+  }
+  return keys;
+}
+
+/**
+ * Calculate balances only from split obligations whose two endpoints are
+ * accepted friends, plus accepted friend settlements for friendships that
+ * still exist. Non-friend split debts remain in the split ledger unchanged,
+ * but they cannot offset a user's friend-only settlement capacity.
+ */
+async function getFriendOnlyNetBalancesInTransaction(
+  transactionId: string,
+): Promise<{ balances: Record<string, number>; friendKeys: Set<string> }> {
+  const [splitDocs, friendSettlementDocs, friendKeys] = await Promise.all([
+    queryEntireCollectionInTransaction("splits", transactionId),
+    queryEntireCollectionInTransaction("friendSettlements", transactionId),
+    getAcceptedFriendshipKeysInTransaction(transactionId),
+  ]);
+  const balances: Record<string, number> = {};
+  const adjust = (userId: string, delta: number) => {
+    balances[userId] = (balances[userId] ?? 0) + delta;
+  };
+
+  for (const doc of splitDocs) {
+    const split = fsDocData(doc);
+    if (split.status === "cancelled") continue;
+    const obligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>>
+      : [];
+    for (const obligation of obligations) {
+      const from = typeof obligation.fromUserId === "string" ? obligation.fromUserId : "";
+      const to = typeof obligation.toUserId === "string" ? obligation.toUserId : "";
+      if (!from || !to || from === to) throw new Error("A split contains an invalid obligation");
+      const total = assertPaise(obligation.amountInPaise, "Split obligation", true);
+      const accepted = assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
+      if (accepted > total) throw new Error("Accepted split repayments exceed an obligation");
+      if (!friendKeys.has(friendshipKey(from, to))) continue;
+      const outstanding = total - accepted;
+      if (outstanding > 0) {
+        adjust(from, -outstanding);
+        adjust(to, outstanding);
+      }
+    }
+  }
+
+  for (const doc of friendSettlementDocs) {
+    const settlement = fsDocData(doc);
+    if (settlement.status !== "accepted") continue;
+    const from = assertId(settlement.fromUserId, "Friend settlement sender");
+    const to = assertId(settlement.toUserId, "Friend settlement recipient");
+    if (from === to) throw new Error("A friend settlement cannot involve the same user twice");
+    // Keep history for former friends, but exclude it from current friend netting.
+    if (!friendKeys.has(friendshipKey(from, to))) continue;
+    const amount = assertPaise(settlement.amountInPaise, "Accepted friend settlement");
+    adjust(from, amount);
+    adjust(to, -amount);
+  }
+
+  const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
+  if (total !== 0) throw new Error(`The friend-only ledger does not reconcile (${total} paise)`);
+  return { balances, friendKeys };
+}
+
+/**
+ * Run a max-flow matching between net debtors and creditors, allowing an edge
+ * only where an accepted friendship exists. This avoids arbitrary A-to-D
+ * suggestions just because A and D appear in the same split network.
+ */
+function simplifyFriendOnlyBalances(
+  balances: Record<string, number>,
+  friendKeys: Set<string>,
+): Array<{ fromUserId: string; toUserId: string; amountInPaise: number }> {
+  const debtors = Object.entries(balances).filter(([, amount]) => amount < 0)
+    .map(([userId, amount]) => ({ userId, amount: -amount })).sort((a, b) => a.userId.localeCompare(b.userId));
+  const creditors = Object.entries(balances).filter(([, amount]) => amount > 0)
+    .map(([userId, amount]) => ({ userId, amount })).sort((a, b) => a.userId.localeCompare(b.userId));
+  const totalDebt = debtors.reduce((sum, item) => sum + item.amount, 0);
+  if (totalDebt !== creditors.reduce((sum, item) => sum + item.amount, 0)) {
+    throw new Error("Friend-only balances do not reconcile");
+  }
+  if (!totalDebt) return [];
+
+  const source = 0;
+  const debtorStart = 1;
+  const creditorStart = debtorStart + debtors.length;
+  const sink = creditorStart + creditors.length;
+  const size = sink + 1;
+  const capacity = Array.from({ length: size }, () => Array<number>(size).fill(0));
+  const residual = Array.from({ length: size }, () => Array<number>(size).fill(0));
+  const neighbors = Array.from({ length: size }, () => new Set<number>());
+  const addEdge = (from: number, to: number, amount: number) => {
+    capacity[from][to] += amount;
+    residual[from][to] += amount;
+    neighbors[from].add(to);
+    neighbors[to].add(from);
+  };
+  debtors.forEach((debtor, i) => addEdge(source, debtorStart + i, debtor.amount));
+  creditors.forEach((creditor, j) => addEdge(creditorStart + j, sink, creditor.amount));
+  debtors.forEach((debtor, i) => creditors.forEach((creditor, j) => {
+    if (friendKeys.has(friendshipKey(debtor.userId, creditor.userId))) {
+      addEdge(debtorStart + i, creditorStart + j, totalDebt);
+    }
+  }));
+
+  while (true) {
+    const parent = Array<number>(size).fill(-1);
+    parent[source] = source;
+    const queue = [source];
+    for (let q = 0; q < queue.length && parent[sink] === -1; q++) {
+      const node = queue[q];
+      for (const next of neighbors[node]) {
+        if (parent[next] === -1 && residual[node][next] > 0) {
+          parent[next] = node;
+          queue.push(next);
+          if (next === sink) break;
+        }
+      }
+    }
+    if (parent[sink] === -1) break;
+    let flow = Number.MAX_SAFE_INTEGER;
+    for (let node = sink; node !== source; node = parent[node]) {
+      flow = Math.min(flow, residual[parent[node]][node]);
+    }
+    for (let node = sink; node !== source; node = parent[node]) {
+      residual[parent[node]][node] -= flow;
+      residual[node][parent[node]] += flow;
+    }
+  }
+
+  const suggestions: Array<{ fromUserId: string; toUserId: string; amountInPaise: number }> = [];
+  debtors.forEach((debtor, i) => creditors.forEach((creditor, j) => {
+    const from = debtorStart + i;
+    const to = creditorStart + j;
+    const originalCapacity = capacity[from][to];
+    if (!originalCapacity) return;
+    const amountInPaise = originalCapacity - residual[from][to];
+    if (amountInPaise > 0) suggestions.push({ fromUserId: debtor.userId, toUserId: creditor.userId, amountInPaise });
+  }));
+  return suggestions.sort((a, b) => a.fromUserId.localeCompare(b.fromUserId) || a.toUserId.localeCompare(b.toUserId));
+}
+
+/**
+ * Return only the connected shared-expense network containing uid. A split
+ * connects its participants and payer; accepted friend settlements preserve
+ * a connection after payment. This stops unrelated expense groups from
+ * settling against each other and keeps other groups' balances private.
+ */
+async function getConnectedNetworkUserIdsInTransaction(
+  uid: string,
+  transactionId: string,
+): Promise<Set<string>> {
+  const [splitDocs, friendSettlementDocs] = await Promise.all([
+    queryEntireCollectionInTransaction("splits", transactionId),
+    queryEntireCollectionInTransaction("friendSettlements", transactionId),
+  ]);
+  const adjacency = new Map<string, Set<string>>();
+  const connectGroup = (rawIds: unknown[]) => {
+    const ids = [...new Set(rawIds.filter((id): id is string => typeof id === "string" && id.length > 0))];
+    for (const id of ids) if (!adjacency.has(id)) adjacency.set(id, new Set<string>());
+    for (const id of ids) for (const other of ids) if (id !== other) adjacency.get(id)!.add(other);
+  };
+
+  for (const doc of splitDocs) {
+    const split = fsDocData(doc);
+    if (split.status === "cancelled") continue;
+    const obligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>>
+      : [];
+    connectGroup([
+      ...(Array.isArray(split.participantIds) ? split.participantIds : []),
+      ...obligations.flatMap((obligation) => [obligation.fromUserId, obligation.toUserId]),
+      split.createdBy,
+      split.paidByUserId,
+    ]);
+  }
+  for (const doc of friendSettlementDocs) {
+    const settlement = fsDocData(doc);
+    if (settlement.status === "accepted") connectGroup([settlement.fromUserId, settlement.toUserId]);
+  }
+
+  const visited = new Set<string>();
+  const stack = [uid];
+  while (stack.length) {
+    const current = stack.pop()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const neighbor of adjacency.get(current) ?? []) if (!visited.has(neighbor)) stack.push(neighbor);
+  }
+  return visited;
+}
+
+async function getNetworkNetBalancesForUser(
+  uid: string,
+): Promise<{
+  balances: Record<string, number>;
+  suggestions: Array<{ fromUserId: string; toUserId: string; amountInPaise: number }>;
+}> {
+  const transactionId = await beginFirestoreTransaction();
+  try {
+    // A single Firestore transaction keeps the component and balance reads on
+    // the same snapshot. It is read-only and is always rolled back.
+    await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
+    const [friendLedger, networkUserIds] = await Promise.all([
+      getFriendOnlyNetBalancesInTransaction(transactionId),
+      getConnectedNetworkUserIdsInTransaction(uid, transactionId),
+    ]);
+    const balances: Record<string, number> = {};
+    for (const userId of networkUserIds) balances[userId] = friendLedger.balances[userId] ?? 0;
+    const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
+    if (total !== 0) throw new Error(`The connected friend-only network does not reconcile (${total} paise)`);
+    const suggestions = simplifyFriendOnlyBalances(balances, friendLedger.friendKeys);
+    await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) });
+    return { balances, suggestions };
+  } catch (error) {
+    try { await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) }); } catch {}
+    throw error;
+  }
+}
+
+/**
+ * Pending split repayments and pending friend-level requests reserve net
+ * capacity for both participants. They are not treated as accepted payments.
+ */
+type ReservationExclusions = {
+  friendSettlementId?: string;
+  splitRepayment?: {
+    splitId: string;
+    fromUserId: string;
+    toUserId: string;
+    amountInPaise: number;
+  };
+};
+
+async function getNetworkReservationsInTransaction(
+  transactionId: string,
+  exclusions: ReservationExclusions = {},
+): Promise<Record<string, number>> {
+  const [splitDocs, friendSettlementDocs, friendKeys] = await Promise.all([
+    queryEntireCollectionInTransaction("splits", transactionId),
+    queryEntireCollectionInTransaction("friendSettlements", transactionId),
+    getAcceptedFriendshipKeysInTransaction(transactionId),
+  ]);
+  const reserved: Record<string, number> = {};
+  const reserve = (userId: string, amount: number) => {
+    if (!userId || amount <= 0) return;
+    reserved[userId] = (reserved[userId] ?? 0) + amount;
+  };
+
+  for (const doc of splitDocs) {
+    const split = fsDocData(doc);
+    if (split.status === "cancelled") continue;
+    const splitId = doc.name?.split("/").at(-1) ?? "";
+    const obligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>>
+      : [];
+    for (const obligation of obligations) {
+      let amount = assertPaise(obligation.pendingAmountInPaise ?? 0, "Pending split repayment", true);
+      const excluded = exclusions.splitRepayment;
+      if (
+        excluded && splitId === excluded.splitId
+        && obligation.fromUserId === excluded.fromUserId
+        && obligation.toUserId === excluded.toUserId
+      ) {
+        // The pending split amount being accepted is already reserved. Remove
+        // only this request, retaining every other pending request's reservation.
+        amount -= excluded.amountInPaise;
+        if (amount < 0) throw new Error("Pending split repayment reservation is inconsistent");
+      }
+      const fromUserId = String(obligation.fromUserId ?? "");
+      const toUserId = String(obligation.toUserId ?? "");
+      if (amount > 0 && fromUserId && toUserId && friendKeys.has(friendshipKey(fromUserId, toUserId))) {
+        reserve(fromUserId, amount);
+        reserve(toUserId, amount);
+      }
+    }
+  }
+
+  for (const doc of friendSettlementDocs) {
+    if (doc.name?.split("/").at(-1) === exclusions.friendSettlementId) continue;
+    const settlement = fsDocData(doc);
+    if (settlement.status !== "pending") continue;
+    const fromUserId = String(settlement.fromUserId ?? "");
+    const toUserId = String(settlement.toUserId ?? "");
+    if (!fromUserId || !toUserId || !friendKeys.has(friendshipKey(fromUserId, toUserId))) continue;
+    const amount = assertPaise(settlement.amountInPaise, "Pending friend settlement", true);
+    reserve(fromUserId, amount);
+    reserve(toUserId, amount);
+  }
+  return reserved;
+}
+
+function availableDebtorCapacity(
+  userId: string,
+  balances: Record<string, number>,
+  reservations: Record<string, number>,
+): number {
+  return Math.max(0, -(balances[userId] ?? 0) - (reservations[userId] ?? 0));
+}
+
+function availableCreditorCapacity(
+  userId: string,
+  balances: Record<string, number>,
+  reservations: Record<string, number>,
+): number {
+  return Math.max(0, (balances[userId] ?? 0) - (reservations[userId] ?? 0));
+}
+
+async function assertUsersAreFriendsInTransaction(
+  userA: string,
+  userB: string,
+  transactionId: string,
+): Promise<void> {
+  if (userA === userB) throw new Error("A repayment cannot be between the same user");
+  const [forward, reverse] = await Promise.all([
+    getFirestoreDocumentInTransaction(`friends/${userA}_${userB}`, transactionId),
+    getFirestoreDocumentInTransaction(`friends/${userB}_${userA}`, transactionId),
+  ]);
+  if (!forward && !reverse) throw new Error("Repayments are allowed only between accepted friends");
+}
+
+async function requestFriendSettlement(
+  uid: string,
+  data: Record<string, unknown>,
+): Promise<{ settlementId: string }> {
+  const toUserId = assertId(data.toUserId, "Recipient user ID");
+  const amountInPaise = assertPaise(data.amountInPaise, "Settlement amount");
+  const idempotencyKey = assertId(data.idempotencyKey, "Idempotency key");
+  const fromProfileId = assertId(data.fromProfileId, "Payer profile ID");
+  const fromAccountId = assertId(data.fromAccountId, "Payer account ID");
+  if (uid === toUserId) throw new Error("You cannot settle a balance with yourself");
+  if (idempotencyKey.length > 200) throw new Error("Idempotency key is too long");
+
+  const settlementId = await sha256Hex(`friend-settlement\u0000${uid}\u0000${idempotencyKey}`);
+  const settlementPath = `friendSettlements/${settlementId}`;
+  const transactionId = await beginFirestoreTransaction();
+
+  try {
+    // Every balance-changing operation reads and writes the same lock document.
+    // This prevents concurrent requests from both spending the same net balance.
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
+    const [existing, payerProfileDoc, payerAccountDoc] = await Promise.all([
+      getFirestoreDocumentInTransaction(settlementPath, transactionId),
+      getFirestoreDocumentInTransaction(`profiles/${fromProfileId}`, transactionId),
+      getFirestoreDocumentInTransaction(`profiles/${fromProfileId}/accounts/${fromAccountId}`, transactionId),
+    ]);
+    if (!payerProfileDoc || fsDocData(payerProfileDoc).userId !== uid) throw new Error("The selected payer profile does not belong to you");
+    if (!payerAccountDoc) throw new Error("The selected payer account was not found");
+
+    if (existing) {
+      const previous = fsDocData(existing);
+      if (previous.fromUserId !== uid || previous.toUserId !== toUserId || previous.amountInPaise !== amountInPaise) {
+        throw new Error("That idempotency key was already used for a different request");
+      }
+      await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) });
+      return { settlementId };
+    }
+
+    await assertUsersAreFriendsInTransaction(uid, toUserId, transactionId);
+    const networkUserIds = await getConnectedNetworkUserIdsInTransaction(uid, transactionId);
+    if (!networkUserIds.has(toUserId)) {
+      throw new Error("The recipient is not part of your connected shared-expense network");
+    }
+    const { balances } = await getFriendOnlyNetBalancesInTransaction(transactionId);
+    const reservations = await getNetworkReservationsInTransaction(transactionId);
+    const debtorCapacity = availableDebtorCapacity(uid, balances, reservations);
+    const creditorCapacity = availableCreditorCapacity(toUserId, balances, reservations);
+    const available = Math.min(debtorCapacity, creditorCapacity);
+
+    if ((balances[uid] ?? 0) >= 0 || (balances[toUserId] ?? 0) <= 0 || available <= 0) {
+      throw new Error("The simplified balances do not show that you owe this friend");
+    }
+    if (amountInPaise > available) {
+      throw new Error(`Amount exceeds the available net settlement balance of ₹${(available / 100).toFixed(2)}`);
+    }
+
+    const record: FriendSettlementRecord = {
+      fromUserId: uid,
+      toUserId,
+      participantIds: [uid, toUserId],
+      amountInPaise,
+      status: "pending",
+      idempotencyKey,
+      fromProfileId,
+      fromAccountId,
+      ...(typeof data.note === "string" && data.note.trim() ? { note: data.note.trim().slice(0, 500) } : {}),
+      createdAt: new Date().toISOString(),
+    };
+    const writes: unknown[] = [
+      {
+        update: {
+          name: fsDocumentName(settlementPath),
+          fields: Object.fromEntries(Object.entries(record).map(([key, value]) => [key, fsEncode(value)])),
+        },
+        currentDocument: { exists: false },
+      },
+      settlementLedgerLockWrite(ledgerLockDoc),
+    ];
+    await commitFirestoreTransaction(transactionId, writes);
+    return { settlementId };
+  } catch (error) {
+    try { await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) }); } catch {}
+    throw error;
+  }
+}
+
+async function acceptFriendSettlement(
+  uid: string,
+  data: Record<string, unknown>,
+): Promise<{ accepted: boolean }> {
+  const settlementId = assertId(data.settlementId, "Settlement ID");
+  const recipientProfileId = assertId(data.recipientProfileId, "Recipient profile ID");
+  const recipientAccountId = assertId(data.recipientAccountId, "Recipient account ID");
+  const settlementPath = `friendSettlements/${settlementId}`;
+  const transactionId = await beginFirestoreTransaction();
+
+  try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
+    const settlementDoc = await getFirestoreDocumentInTransaction(settlementPath, transactionId);
+    if (!settlementDoc) throw new Error("Friend settlement request not found");
+    const settlement = fsDocData(settlementDoc);
+    if (settlement.status === "accepted") {
+      await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) });
+      return { accepted: true };
+    }
+    if (settlement.status !== "pending") throw new Error("Only pending requests can be accepted");
+    if (settlement.toUserId !== uid) throw new Error("Only the recipient can accept this request");
+
+    const fromUserId = assertId(settlement.fromUserId, "Debtor user ID");
+    const amountInPaise = assertPaise(settlement.amountInPaise, "Settlement amount");
+    const fromProfileId = assertId(settlement.fromProfileId, "Payer profile ID");
+    const fromAccountId = assertId(settlement.fromAccountId, "Payer account ID");
+    await assertUsersAreFriendsInTransaction(fromUserId, uid, transactionId);
+    const networkUserIds = await getConnectedNetworkUserIdsInTransaction(uid, transactionId);
+    if (!networkUserIds.has(fromUserId)) throw new Error("The sender is no longer in your connected shared-expense network");
+
+    const [payerProfileDoc, payerAccountDoc, recipientProfileDoc, recipientAccountDoc] = await Promise.all([
+      getFirestoreDocumentInTransaction(`profiles/${fromProfileId}`, transactionId),
+      getFirestoreDocumentInTransaction(`profiles/${fromProfileId}/accounts/${fromAccountId}`, transactionId),
+      getFirestoreDocumentInTransaction(`profiles/${recipientProfileId}`, transactionId),
+      getFirestoreDocumentInTransaction(`profiles/${recipientProfileId}/accounts/${recipientAccountId}`, transactionId),
+    ]);
+    if (!payerProfileDoc || fsDocData(payerProfileDoc).userId !== fromUserId) throw new Error("The selected payer profile no longer belongs to the sender");
+    if (!payerAccountDoc) throw new Error("The selected payer account was not found");
+    if (!recipientProfileDoc || fsDocData(recipientProfileDoc).userId !== uid) throw new Error("The selected receiving profile does not belong to you");
+    if (!recipientAccountDoc) throw new Error("The selected receiving account was not found");
+
+    const { balances } = await getFriendOnlyNetBalancesInTransaction(transactionId);
+    const reservations = await getNetworkReservationsInTransaction(transactionId, { friendSettlementId: settlementId });
+    const available = Math.min(
+      availableDebtorCapacity(fromUserId, balances, reservations),
+      availableCreditorCapacity(uid, balances, reservations),
+    );
+    if ((balances[fromUserId] ?? 0) >= 0 || (balances[uid] ?? 0) <= 0 || amountInPaise > available) {
+      throw new Error("The friend-only balance changed. This request can no longer be accepted for that amount.");
+    }
+
+    const payerAccount = fsDocData(payerAccountDoc);
+    const recipientAccount = fsDocData(recipientAccountDoc);
+    const payerBalance = Number(payerAccount.balance ?? 0);
+    const recipientBalance = Number(recipientAccount.balance ?? 0);
+    if (!Number.isFinite(payerBalance) || !Number.isFinite(recipientBalance)) {
+      throw new Error("Both selected accounts must have valid numeric balances");
+    }
+    const amount = amountInPaise / 100;
+    const now = new Date().toISOString();
+    const date = now.slice(0, 10);
+    const payerAccountName = typeof payerAccount.name === "string" ? payerAccount.name : "selected account";
+    const recipientAccountName = typeof recipientAccount.name === "string" ? recipientAccount.name : "selected account";
+    const payerTxHash = await sha256Hex(`friend-settlement\u0000${settlementId}\u0000${fromUserId}`);
+    const recipientTxHash = await sha256Hex(`friend-settlement\u0000${settlementId}\u0000${uid}`);
+    const payerTransactionId = `friend_pay_${payerTxHash.slice(0, 40)}`;
+    const recipientTransactionId = `friend_pay_${recipientTxHash.slice(0, 40)}`;
+    const payerTransactionPath = `profiles/${fromProfileId}/transactions/${payerTransactionId}`;
+    const recipientTransactionPath = `profiles/${recipientProfileId}/transactions/${recipientTransactionId}`;
+    const payerTransaction = {
+      profileId: fromProfileId, userId: fromUserId, type: "expense", amount, amountInPaise,
+      currency: "INR", category: "Friend Settlement", categoryId: "friend-settlement",
+      categoryIcon: "↗️", paymentMode: "friend-settlement", accountId: fromAccountId,
+      notes: `Settlement payment via ${payerAccountName}`, date, kind: "repayment",
+      settlementId, friendSettlementId: settlementId, counterpartyUserId: uid,
+      sourceProfileId: fromProfileId, sourceTransactionId: null,
+      createdAt: now, updatedAt: now, serverGenerated: true,
+    };
+    const recipientTransaction = {
+      profileId: recipientProfileId, userId: uid, type: "income", amount, amountInPaise,
+      currency: "INR", category: "Friend Settlement Received", categoryId: "friend-settlement",
+      categoryIcon: "↙️", paymentMode: "friend-settlement", accountId: recipientAccountId,
+      notes: `Settlement received via ${recipientAccountName}`, date, kind: "repayment",
+      settlementId, friendSettlementId: settlementId, counterpartyUserId: fromUserId,
+      sourceProfileId: recipientProfileId, sourceTransactionId: null,
+      createdAt: now, updatedAt: now, serverGenerated: true,
+    };
+
+    await commitFirestoreTransaction(transactionId, [
+      { update: { name: fsDocumentName(payerTransactionPath), fields: Object.fromEntries(Object.entries(payerTransaction).map(([key, value]) => [key, fsEncode(value)])) }, currentDocument: { exists: false } },
+      { update: { name: fsDocumentName(recipientTransactionPath), fields: Object.fromEntries(Object.entries(recipientTransaction).map(([key, value]) => [key, fsEncode(value)])) }, currentDocument: { exists: false } },
+      { update: { name: fsDocumentName(`profiles/${fromProfileId}/accounts/${fromAccountId}`), fields: { balance: fsEncode(Math.round((payerBalance - amount) * 100) / 100), updatedAt: fsEncode(now) } }, updateMask: { fieldPaths: ["balance", "updatedAt"] }, currentDocument: { exists: true } },
+      { update: { name: fsDocumentName(`profiles/${recipientProfileId}/accounts/${recipientAccountId}`), fields: { balance: fsEncode(Math.round((recipientBalance + amount) * 100) / 100), updatedAt: fsEncode(now) } }, updateMask: { fieldPaths: ["balance", "updatedAt"] }, currentDocument: { exists: true } },
+      { update: { name: fsDocumentName(settlementPath), fields: Object.fromEntries(Object.entries({ status: "accepted", acceptedAt: now, acceptedBy: uid, recipientProfileId, recipientAccountId, payerTransactionId, recipientTransactionId }).map(([key, value]) => [key, fsEncode(value)])) }, updateMask: { fieldPaths: ["status", "acceptedAt", "acceptedBy", "recipientProfileId", "recipientAccountId", "payerTransactionId", "recipientTransactionId"] }, currentDocument: { exists: true } },
+      settlementLedgerLockWrite(ledgerLockDoc),
+    ]);
+    return { accepted: true };
+  } catch (error) {
+    try { await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) }); } catch {}
+    throw error;
+  }
+}
+
+async function closeFriendSettlement(
+  uid: string,
+  data: Record<string, unknown>,
+  terminalStatus: "rejected" | "cancelled",
+): Promise<{ rejected?: boolean; cancelled?: boolean }> {
+  const settlementId = assertId(data.settlementId, "Settlement ID");
+  const settlementPath = `friendSettlements/${settlementId}`;
+  const transactionId = await beginFirestoreTransaction();
+
+  try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
+    const settlementDoc = await getFirestoreDocumentInTransaction(
+      settlementPath,
+      transactionId,
+    );
+
+    if (!settlementDoc) {
+      throw new Error("Friend settlement request not found");
+    }
+
+    const settlement = fsDocData(settlementDoc);
+
+    if (settlement.status === terminalStatus) {
+      await firestoreRequest(":rollback", {
+        method: "POST",
+        body: JSON.stringify({ transaction: transactionId }),
+      });
+
+      return terminalStatus === "rejected"
+        ? { rejected: true }
+        : { cancelled: true };
+    }
+
+    if (settlement.status !== "pending") {
+      throw new Error("Only pending requests can be closed");
+    }
+
+    const isAllowed =
+      terminalStatus === "cancelled"
+        ? settlement.fromUserId === uid
+        : settlement.toUserId === uid;
+
+    if (!isAllowed) {
+      throw new Error(
+        terminalStatus === "cancelled"
+          ? "Only the sender can cancel this request"
+          : "Only the recipient can reject this request",
+      );
+    }
+
+    const timestampField =
+      terminalStatus === "cancelled" ? "cancelledAt" : "rejectedAt";
+
+    await commitFirestoreTransaction(transactionId, [
+      {
+        update: {
+          name: fsDocumentName(settlementPath),
+          fields: {
+            status: fsEncode(terminalStatus),
+            [timestampField]: fsEncode(new Date().toISOString()),
+          },
+        },
+        updateMask: {
+          fieldPaths: ["status", timestampField],
+        },
+        currentDocument: { exists: true },
+      },
+      settlementLedgerLockWrite(ledgerLockDoc),
+    ]);
+
+    return terminalStatus === "rejected"
+      ? { rejected: true }
+      : { cancelled: true };
+  } catch (error) {
+    try {
+      await firestoreRequest(":rollback", {
+        method: "POST",
+        body: JSON.stringify({ transaction: transactionId }),
+      });
+    } catch {
+      // Ignore cleanup error; preserve original error.
+    }
+
+    throw error;
+  }
+}
+
 async function createSharedExpense(uid: string, data: Record<string, unknown>) {
   const sourceProfileId = assertId(data.sourceProfileId, "Source profile");
   const sourceTransactionId = assertId(data.sourceTransactionId, "Source transaction");
@@ -544,6 +1301,7 @@ async function createSharedExpense(uid: string, data: Record<string, unknown>) {
   let committed = false;
 
   try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
     const sourcePath = `profiles/${sourceProfileId}/transactions/${sourceTransactionId}`;
     const sourceLockPath = `splitSourceLocks/${sourceProfileId}/transactions/${sourceTransactionId}`;
 
@@ -761,6 +1519,7 @@ async function createSharedExpense(uid: string, data: Record<string, unknown>) {
       };
     }
 
+    writes.push(settlementLedgerLockWrite(ledgerLockDoc));
     await commitFirestoreTransaction(transactionId, writes);
     committed = true;
     return { splitId };
@@ -800,6 +1559,7 @@ async function requestSplitRepayment(
   let committed = false;
 
   try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
     const [splitDoc, existingSettlementDoc, senderProfileDoc] =
       await Promise.all([
         getFirestoreDocumentInTransaction(splitPath, transactionId),
@@ -834,6 +1594,7 @@ async function requestSplitRepayment(
       ? split.paidByUserId
       : "";
 
+    await assertUsersAreFriendsInTransaction(uid, payerUid, transactionId);
     const index = obligationIndex(obligations, uid, payerUid);
 
     if (index < 0) {
@@ -876,6 +1637,18 @@ async function requestSplitRepayment(
       );
     }
 
+    // Split-specific repayments and global friend-level settlements share one
+    // net ledger. Reserve against the sender's current net debt so a prior or
+    // pending global payment cannot be collected again through a split.
+    const { balances } = await getFriendOnlyNetBalancesInTransaction(transactionId);
+    const reservations = await getNetworkReservationsInTransaction(transactionId);
+    const availableNetDebt = availableDebtorCapacity(uid, balances, reservations);
+    if ((balances[uid] ?? 0) >= 0 || amountInPaise > availableNetDebt) {
+      throw new Error(
+        `Repayment exceeds your available net debt of ₹${(availableNetDebt / 100).toFixed(2)} after pending requests`,
+      );
+    }
+
     const updatedObligations = obligations.map((item, i) =>
       i === index
         ? {
@@ -885,7 +1658,7 @@ async function requestSplitRepayment(
         : item
     );
 
-    const writes = [
+    const writes: unknown[] = [
       {
         update: {
           name: fsDocumentName(settlementPath),
@@ -919,6 +1692,7 @@ async function requestSplitRepayment(
       },
     ];
 
+    writes.push(settlementLedgerLockWrite(ledgerLockDoc));
     await commitFirestoreTransaction(transactionId, writes);
     committed = true;
 
@@ -1017,6 +1791,7 @@ async function acceptSplitRepayment(uid: string, data: Record<string, unknown>) 
   const tx = await beginFirestoreTransaction();
   let committed = false;
   try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, tx);
     const [splitDoc, settlementDoc, recipientDoc, senderDoc, ...profileDocs] = await Promise.all([
       getFirestoreDocumentInTransaction(splitPath, tx),
       getFirestoreDocumentInTransaction(settlementPath, tx),
@@ -1037,6 +1812,7 @@ async function acceptSplitRepayment(uid: string, data: Record<string, unknown>) 
     if (split.createdBy !== uid || split.paidByUserId !== uid || settlement.toUserId !== uid) {
       throw new Error("Only the original creditor can accept this repayment");
     }
+    await assertUsersAreFriendsInTransaction(String(settlement.fromUserId), uid, tx);
     if (!recipientDoc || fsDocData(recipientDoc).userId !== uid) {
       throw new Error("Recipient profile must belong to the accepting creditor");
     }
@@ -1067,6 +1843,22 @@ async function acceptSplitRepayment(uid: string, data: Record<string, unknown>) 
     const pending = Number(obligation.pendingAmountInPaise ?? 0);
     if (amount > total - accepted) throw new Error("Repayment exceeds outstanding obligation");
     if (pending < amount) throw new Error("Repayment reservation is missing or inconsistent");
+
+    const { balances } = await getFriendOnlyNetBalancesInTransaction(tx);
+    const reservations = await getNetworkReservationsInTransaction(tx, {
+      splitRepayment: {
+        splitId,
+        fromUserId: String(settlement.fromUserId),
+        toUserId: uid,
+        amountInPaise: amount,
+      },
+    });
+    const availableNetDebt = availableDebtorCapacity(String(settlement.fromUserId), balances, reservations);
+    if ((balances[String(settlement.fromUserId)] ?? 0) >= 0 || amount > availableNetDebt) {
+      throw new Error(
+        `The sender's net debt changed. This repayment can no longer be accepted for that amount (available ₹${(availableNetDebt / 100).toFixed(2)}).`,
+      );
+    }
 
     const updatedObligations = obligations.map((o, i) => i === index
       ? { ...o, acceptedAmountInPaise: accepted + amount, pendingAmountInPaise: Math.max(0, pending - amount) }
@@ -1138,6 +1930,7 @@ async function acceptSplitRepayment(uid: string, data: Record<string, unknown>) 
       ];
     }
 
+    writes.push(settlementLedgerLockWrite(ledgerLockDoc));
     await commitFirestoreTransaction(tx, writes);
     committed = true;
     return { accepted: true, finalized: finalizing };
@@ -1158,6 +1951,7 @@ async function closePendingSettlement(
   const tx = await beginFirestoreTransaction();
   let committed = false;
   try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, tx);
     const [splitDoc, settlementDoc] = await Promise.all([
       getFirestoreDocumentInTransaction(splitPath, tx),
       getFirestoreDocumentInTransaction(settlementPath, tx),
@@ -1194,6 +1988,7 @@ async function closePendingSettlement(
     await commitFirestoreTransaction(tx, [
       { update: { name: fsDocumentName(settlementPath), fields: Object.fromEntries(Object.entries(settlementFields).map(([k,v]) => [k, fsEncode(v)])) }, updateMask: { fieldPaths: Object.keys(settlementFields) }, currentDocument: { exists: true } },
       { update: { name: fsDocumentName(splitPath), fields: Object.fromEntries(Object.entries({ obligations: updated, status: splitStatusFromObligations(updated), updatedAt: now }).map(([k,v]) => [k, fsEncode(v)])) }, updateMask: { fieldPaths: ["obligations","status","updatedAt"] }, currentDocument: { exists: true } },
+      settlementLedgerLockWrite(ledgerLockDoc),
     ]);
     committed = true;
     return { [terminalStatus]: true };
@@ -1210,6 +2005,7 @@ async function cancelSharedExpense(uid: string, data: Record<string, unknown>) {
   const tx = await beginFirestoreTransaction();
   let committed = false;
   try {
+    const ledgerLockDoc = await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, tx);
     const splitDoc = await getFirestoreDocumentInTransaction(splitPath, tx);
     if (!splitDoc) throw new Error("Split not found");
     const split = fsDocData(splitDoc);
@@ -1228,6 +2024,9 @@ async function cancelSharedExpense(uid: string, data: Record<string, unknown>) {
     if (Array.isArray(split.obligations) && split.obligations.some((o: Record<string, unknown>) => Number(o.pendingAmountInPaise ?? 0) > 0)) {
       throw new Error("Cancel pending repayment requests before cancelling the split");
     }
+    // Friend-level settlements are global transfers, not assigned to a split.
+    // Accepted transfers remain in the ledger if this split is cancelled; any
+    // pending friend request must pass a fresh balance check before acceptance.
     const now = new Date().toISOString();
     const writes: unknown[] = [{
       update: { name: fsDocumentName(splitPath), fields: Object.fromEntries(Object.entries({
@@ -1245,6 +2044,7 @@ async function cancelSharedExpense(uid: string, data: Record<string, unknown>) {
         currentDocument: { exists: true },
       });
     }
+    writes.push(settlementLedgerLockWrite(ledgerLockDoc));
     await commitFirestoreTransaction(tx, writes);
     committed = true;
     return { cancelled: true };
@@ -1300,6 +2100,35 @@ Deno.serve(async (req: Request) => {
         },
         { status: 200, headers: corsHeaders },
       );
+    }
+
+    if (req.method === 'POST' && url.pathname.endsWith('/request-friend-settlement')) {
+      const body = await req.json() as Record<string, unknown>;
+      const result = await requestFriendSettlement(uid, body);
+      return Response.json(result, { status: 201, headers: corsHeaders });
+    }
+
+    if (req.method === 'POST' && url.pathname.endsWith('/accept-friend-settlement')) {
+      const body = await req.json() as Record<string, unknown>;
+      const result = await acceptFriendSettlement(uid, body);
+      return Response.json(result, { status: 200, headers: corsHeaders });
+    }
+
+    if (req.method === 'POST' && url.pathname.endsWith('/reject-friend-settlement')) {
+      const body = await req.json() as Record<string, unknown>;
+      const result = await closeFriendSettlement(uid, body, 'rejected');
+      return Response.json(result, { status: 200, headers: corsHeaders });
+    }
+
+    if (req.method === 'POST' && url.pathname.endsWith('/cancel-friend-settlement')) {
+      const body = await req.json() as Record<string, unknown>;
+      const result = await closeFriendSettlement(uid, body, 'cancelled');
+      return Response.json(result, { status: 200, headers: corsHeaders });
+    }
+
+    if (req.method === "POST" && url.pathname.endsWith("/get-network-net-balances")) {
+      const result = await getNetworkNetBalancesForUser(uid);
+      return Response.json(result, { status: 200, headers: corsHeaders });
     }
 
     if (req.method === "POST" && url.pathname.endsWith("/create-shared-expense")) {

@@ -83,12 +83,13 @@ export default function DashboardScreen() {
         .reduce((sum, transaction) => sum + (Number.isSafeInteger(transaction.amountInPaise)
           ? transaction.amountInPaise : Math.round(Number(transaction.amount || 0) * 100)), 0);
       const excludedSourcePaise = getExcludedSourceAmountInPaise(splits, currentProfile.id);
-      const incomeTotalPaise = Math.round(Number(incomeTotalSnapshot.data().total || 0) * 100) 
-      // - repaymentIncomePaise
-      ;
-      const expenseTotalPaise = Math.round(Number(expenseTotalSnapshot.data().total || 0) * 100)
-        // - repaymentExpensePaise - excludedSourcePaise
-        ;
+      // Repayments are transfers between accounts, not new income or spending.
+      const incomeTotalPaise = Math.max(0, Math.round(Number(incomeTotalSnapshot.data().total || 0) * 100) - repaymentIncomePaise);
+      const expenseTotalPaise = Math.max(0,
+        Math.round(Number(expenseTotalSnapshot.data().total || 0) * 100)
+        - repaymentExpensePaise
+        - excludedSourcePaise,
+      );
       setBalance((incomeTotalPaise - expenseTotalPaise) / 100);
 
       const transactions = monthSnapshot.docs.map((transactionDoc) => ({

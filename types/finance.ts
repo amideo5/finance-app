@@ -65,6 +65,28 @@ export interface SplitSettlement {
   acceptedBy?: string;
 }
 
+export interface FriendSettlement {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  participantIds: string[];
+  amountInPaise: number;
+  status: SettlementStatus;
+  idempotencyKey: string;
+  fromProfileId?: string;
+  fromAccountId?: string;
+  recipientProfileId?: string;
+  recipientAccountId?: string;
+  payerTransactionId?: string;
+  recipientTransactionId?: string;
+  note?: string;
+  createdAt?: string;
+  acceptedAt?: string;
+  rejectedAt?: string;
+  cancelledAt?: string;
+  acceptedBy?: string;
+}
+
 export interface FinanceTransaction {
   id: string;
   profileId: string;
@@ -74,6 +96,7 @@ export interface FinanceTransaction {
   kind?: SplitTransactionKind;
   splitId?: string;
   settlementId?: string;
+  friendSettlementId?: string;
   counterpartyUserId?: string;
   sourceProfileId?: string;
   sourceTransactionId?: string;

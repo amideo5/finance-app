@@ -3,8 +3,10 @@ import test from 'node:test';
 import {
   allocateEqualShares,
   calculateNetBalances,
+  calculateFriendNetBalances,
   getOutstandingObligations,
   simplifyDebts,
+  simplifyDebtsWithFriendships,
   validateCustomShares,
 } from '../src/utils/splitUtils.ts';
 import type { SharedExpenseSplit, SplitSettlement } from '../types/finance.ts';
@@ -75,6 +77,26 @@ test('multiple partial repayments settle the obligation exactly', () => {
   assert.equal(getOutstandingObligations([split()], repayments).find((item) => item.fromUserId === 'B'), undefined);
 });
 
+
+test('accepted friend-level payment reduces sender debt and recipient credit without mutating a specific split', () => {
+  const friendPayment = {
+    id: 'friend-settlement-1', fromUserId: 'B', toUserId: 'A', participantIds: ['A', 'B'],
+    amountInPaise: 25000, status: 'accepted' as const, idempotencyKey: 'friend-key-1',
+  };
+  assert.deepEqual(calculateFriendNetBalances([split()], [], [friendPayment]), {
+    A: 175000, B: -75000, C: -100000,
+  });
+  assert.equal(getOutstandingObligations([split()]).find((item) => item.fromUserId === 'B')?.amountInPaise, 100000);
+});
+
+test('pending friend-level requests do not change balances', () => {
+  const pendingPayment = {
+    id: 'friend-settlement-pending', fromUserId: 'B', toUserId: 'A', participantIds: ['A', 'B'],
+    amountInPaise: 25000, status: 'pending' as const, idempotencyKey: 'friend-pending-key',
+  };
+  assert.deepEqual(calculateFriendNetBalances([split()], [], [pendingPayment]), calculateNetBalances([split()]));
+});
+
 test('custom allocations reject invalid totals and duplicate users', () => {
   assert.throws(() => validateCustomShares(100, [
     { userId: 'A', shareAmountInPaise: 50 }, { userId: 'B', shareAmountInPaise: 49 },
@@ -94,4 +116,24 @@ test('debt simplification reconciles whole-paise balances deterministically', ()
 
 test('cancelled splits are excluded from balances', () => {
   assert.deepEqual(calculateNetBalances([split({ status: 'cancelled' })]), {});
+});
+
+
+test('friend-only matching never redirects a shared balance across non-friends', () => {
+  // B owes A and A owes D. The net positions are B=-5000, D=+5000,
+  // but B and D are not friends, so they must not get a suggested payment.
+  assert.deepEqual(simplifyDebtsWithFriendships(
+    { A: 0, B: -5000, D: 5000 },
+    [['A', 'B'], ['A', 'D']],
+  ), []);
+});
+
+test('friend-only matching emits only directly accepted friend pairs', () => {
+  assert.deepEqual(simplifyDebtsWithFriendships(
+    { A: -10000, B: 6000, C: 4000 },
+    [['A', 'B'], ['A', 'C']],
+  ), [
+    { fromUserId: 'A', toUserId: 'B', amountInPaise: 6000 },
+    { fromUserId: 'A', toUserId: 'C', amountInPaise: 4000 },
+  ]);
 });

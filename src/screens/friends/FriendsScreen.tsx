@@ -1,4 +1,5 @@
 import FriendCard from '@/src/components/finance/FriendCard';
+import { getAccounts } from '@/src/services/firebase/accountsService';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import {
@@ -9,13 +10,25 @@ import {
     rejectFriendRequest,
     removeFriend
 } from '@/src/services/firebase/friendsService';
-import { getSplitSettlements, getUserSplits } from '@/src/services/firebase/splitService';
-import { buildMaps, calculateNetBalances, getOutstandingObligations, simplifyDebts } from '@/src/utils/splitUtils';
+import {
+  acceptFriendSettlement,
+  cancelFriendSettlement,
+  getFriendNetBalances,
+  getFriendSettlements,
+  getSplitSettlements,
+  getUserSplits,
+  rejectFriendSettlement,
+  requestFriendSettlement,
+} from '@/src/services/firebase/splitService';
+import type { FinanceAccount, FriendSettlement } from '@/types/finance';
+import { buildMaps, getOutstandingObligations, type SettlementSuggestion } from '@/src/utils/splitUtils';
 import { useRouter } from 'expo-router';
 import { UserPlus, Users } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import {
     Alert,
+    Modal,
+    TextInput,
     RefreshControl,
     ScrollView,
     StyleSheet,
@@ -32,47 +45,58 @@ export default function FriendsScreen() {
   const [sentRequests, setSentRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'friends' | 'pending' | 'sent' | 'splits'>('friends');
+  const [activeTab, setActiveTab] = useState<'friends' | 'pending' | 'sent' | 'splits' | 'settlements'>('friends');
   const [splits, setSplits] = useState<any[]>([]);
   const [balances, setBalances] = useState<Record<string, number>>({});
-  const [settlements, setSettlements] = useState<any[]>([]);
+  const [settlements, setSettlements] = useState<SettlementSuggestion[]>([]);
   const [outstandingTotalPaise, setOutstandingTotalPaise] = useState(0);
-
-  // const mergeSettlements = (settlements: any[], currentUser: string) => {
-  //   const oweMap: Record<string, number> = {};
-  //   const getMap: Record<string, number> = {};
-
-  //   settlements.forEach((s) => {
-  //     if (s.from === currentUser) {
-  //       oweMap[s.to] = (oweMap[s.to] || 0) + s.amount;
-  //     } else if (s.to === currentUser) {
-  //       getMap[s.from] = (getMap[s.from] || 0) + s.amount;
-  //     }
-  //   });
-
-  //   return { oweMap, getMap };
-  // };
+  const [friendSettlements, setFriendSettlements] = useState<FriendSettlement[]>([]);
+  const [accounts, setAccounts] = useState<FinanceAccount[]>([]);
+  const [repaymentTarget, setRepaymentTarget] = useState<{ userId: string; maxPaise: number } | null>(null);
+  const [repaymentAmount, setRepaymentAmount] = useState('');
+  const [selectedPayerAccountId, setSelectedPayerAccountId] = useState('');
+  const [acceptSettlementTarget, setAcceptSettlementTarget] = useState<string | null>(null);
+  const [submittingRepayment, setSubmittingRepayment] = useState(false);
+  const [acceptingSettlement, setAcceptingSettlement] = useState(false);
 
   const loadSplits = useCallback(async () => {
-    if (!currentProfile?.userId) return;
-    const data = await getUserSplits(currentProfile!.userId);
-    setSplits(data);
-    const settlementRows = (await Promise.all(data.map((split) => getSplitSettlements(split.id)))).flat();
-    const result = calculateNetBalances(data, settlementRows);
-    setBalances(result);
-    setOutstandingTotalPaise(getOutstandingObligations(data, settlementRows).reduce((sum, item) => sum + item.amountInPaise, 0));
+    const userId = currentProfile?.userId;
+    if (!userId) return;
+    try {
+      const userSplits = await getUserSplits(userId);
+      const splitSettlementRows = (await Promise.all(
+        userSplits.map((split) => getSplitSettlements(split.id)),
+      )).flat();
+      const friendSettlementRows = await getFriendSettlements(userId);
+      setSplits(userSplits);
+      setFriendSettlements(friendSettlementRows);
 
-    const simplified = simplifyDebts(result);
-    setSettlements(simplified);
+      // A client can only read splits in which the current user participates.
+      // Ask the trusted backend for friend-only connected-network balances and
+      // directly friend-linked net suggestions across all relevant splits.
+      const netLedger = await getFriendNetBalances(userId);
+      setBalances(netLedger.balances);
+      // The server returns max-flow matches using accepted friendship edges only.
+      // Never locally simplify the unfiltered network balances: that can invent
+      // suggestions between people who merely share a split.
+      setSettlements(netLedger.suggestions);
+      const outstanding = getOutstandingObligations(userSplits, splitSettlementRows);
+      setOutstandingTotalPaise(outstanding.reduce((total, item) => total + item.amountInPaise, 0));
+    } catch (error) {
+      console.error('Failed to load split and settlement balances:', error);
+      Alert.alert('Could not load balances', error instanceof Error ? error.message : 'Please try again.');
+    }
   }, [currentProfile]);
 
   const friendMap = Object.fromEntries(
-    friends.map(f => [f.friendId, f.profileData?.name || f.friendId])
+    friends.map((friend) => [friend.friendId, friend.profileData?.name?.trim() || 'Friend'])
   );
 
   const getName = (id: string) => {
     if (id === currentProfile?.userId) return 'You';
-    return friendMap[id] || id;
+    // Do not expose raw Firebase user IDs when a profile lookup is still loading
+    // or the friend has no readable profile record.
+    return friendMap[id] || 'Friend';
   };
 
   const loadFriendsData = useCallback(async () => {
@@ -80,15 +104,17 @@ export default function FriendsScreen() {
 
     setLoading(true);
     try {
-      const [friendsList, pendingList, sentList] = await Promise.all([
+      const [friendsList, pendingList, sentList, accountList] = await Promise.all([
         getUserFriends(currentProfile!.userId),
         getPendingRequests(currentProfile!.userId),
         getSentRequests(currentProfile!.userId),
+        getAccounts(currentProfile!.id),
       ]);
 
       setFriends(friendsList);
       setPendingRequests(pendingList);
       setSentRequests(sentList);
+      setAccounts(accountList as FinanceAccount[]);
     } catch (error) {
       console.error('Error loading friends data:', error);
       Alert.alert('Error', 'Failed to load friends data');
@@ -96,6 +122,112 @@ export default function FriendsScreen() {
       setLoading(false);
     }
   }, [currentProfile]);
+
+  const refreshSettlementData = async () => {
+    await Promise.all([loadSplits(), loadFriendsData()]);
+  };
+
+  const openFriendRepayment = (toUserId: string, maxPaise: number) => {
+    if (accounts.length === 0) {
+      Alert.alert('Account required', 'Add an account before proposing a settlement so the payment can be linked to a funding source.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Add account', onPress: () => router.push('/accounts/add') },
+      ]);
+      return;
+    }
+    setSelectedPayerAccountId(accounts[0]?.id || '');
+    setRepaymentTarget({ userId: toUserId, maxPaise });
+    setRepaymentAmount((maxPaise / 100).toFixed(2));
+  };
+
+  const submitFriendRepayment = async () => {
+    const fromUserId = currentProfile?.userId;
+    if (!fromUserId || !repaymentTarget || !currentProfile) return;
+    if (!selectedPayerAccountId || !accounts.some((account) => account.id === selectedPayerAccountId)) {
+      Alert.alert('Choose an account', 'Select the account the payment will come from.');
+      return;
+    }
+    const parsed = Number(repaymentAmount);
+    const amountInPaise = Math.round(parsed * 100);
+    if (!Number.isFinite(parsed) || !Number.isSafeInteger(amountInPaise) || amountInPaise <= 0 || amountInPaise > repaymentTarget.maxPaise) {
+      Alert.alert('Invalid amount', `Enter an amount from ₹0.01 up to ₹${(repaymentTarget.maxPaise / 100).toFixed(2)}.`);
+      return;
+    }
+    setSubmittingRepayment(true);
+    try {
+      await requestFriendSettlement({
+        toUserId: repaymentTarget.userId,
+        amountInPaise,
+        fromProfileId: currentProfile.id,
+        fromAccountId: selectedPayerAccountId,
+        idempotencyKey: `friend-settlement-${fromUserId}-${repaymentTarget.userId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      setRepaymentTarget(null);
+      Alert.alert('Request sent', `Your ₹${(amountInPaise / 100).toFixed(2)} partial payment request was sent. The recipient must accept it.`);
+      await refreshSettlementData();
+    } catch (error) {
+      void refreshSettlementData();
+      console.error('Friend settlement request failed:', error);
+      Alert.alert('Could not send request', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setSubmittingRepayment(false);
+    }
+  };
+
+  const handleAcceptFriendSettlement = (settlementId: string) => {
+    if (!currentProfile) return;
+    if (accounts.length === 0) {
+      Alert.alert('Account required', 'Add a receiving account before accepting this payment.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Add account', onPress: () => router.push('/accounts/add') },
+      ]);
+      return;
+    }
+    setAcceptSettlementTarget(settlementId);
+  };
+
+  const confirmAcceptFriendSettlement = async (recipientAccountId: string) => {
+    if (!acceptSettlementTarget || !currentProfile) return;
+    setAcceptingSettlement(true);
+    try {
+      await acceptFriendSettlement({
+        settlementId: acceptSettlementTarget,
+        recipientProfileId: currentProfile.id,
+        recipientAccountId,
+      });
+      setAcceptSettlementTarget(null);
+      Alert.alert('Settlement accepted', 'Linked transaction entries were created and both selected account balances were updated.');
+      await refreshSettlementData();
+    } catch (error) {
+      void refreshSettlementData();
+      console.error('Accepting friend settlement failed:', error);
+      Alert.alert('Could not accept settlement', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setAcceptingSettlement(false);
+    }
+  };
+
+  const handleRejectFriendSettlement = async (settlementId: string) => {
+    try {
+      await rejectFriendSettlement({ settlementId });
+      await refreshSettlementData();
+    } catch (error) {
+      void refreshSettlementData();
+      console.error('Rejecting friend settlement failed:', error);
+      Alert.alert('Could not reject request', error instanceof Error ? error.message : 'Please try again.');
+    }
+  };
+
+  const handleCancelFriendSettlement = async (settlementId: string) => {
+    try {
+      await cancelFriendSettlement({ settlementId });
+      await refreshSettlementData();
+    } catch (error) {
+      void refreshSettlementData();
+      console.error('Cancelling friend settlement failed:', error);
+      Alert.alert('Could not cancel request', error instanceof Error ? error.message : 'Please try again.');
+    }
+  };
 
   useEffect(() => {
     if (currentProfile) {
@@ -156,20 +288,15 @@ export default function FriendsScreen() {
   };
 
   const renderSplits = () => {
-    if (splits.length === 0) {
-      return (
-        <View style={styles.emptyState}>
-          <Users size={48} color={colors.textSecondary} />
-          <Text style={styles.emptyText}>No splits yet</Text>
-        </View>
-      );
-    }
     if (!currentProfile) return null;
 
-    const { oweMap, getMap } = buildMaps(
-      settlements,
-      currentProfile.userId
-    );
+    const acceptedFriendIds = new Set(friends.map((friend) => String(friend.friendId)));
+    const friendOnlySuggestions = settlements.filter((item) => {
+      if (item.fromUserId === currentProfile.userId) return acceptedFriendIds.has(item.toUserId);
+      if (item.toUserId === currentProfile.userId) return acceptedFriendIds.has(item.fromUserId);
+      return false; // this screen only renders the signed-in user's own suggestions
+    });
+    const { oweMap, getMap } = buildMaps(friendOnlySuggestions, currentProfile.userId);
 
     const hasBalance = Object.values(balances).some((value) => value !== 0);
 
@@ -182,10 +309,10 @@ export default function FriendsScreen() {
       <>
         {/* 🔥 DASHBOARD */}
         <View style={styles.dashboard}>
-          <Text style={styles.dashboardLabel}>Total shared expenses</Text>
+          {/* <Text style={styles.dashboardLabel}>Total shared expenses</Text>
           <Text style={styles.name}>₹{(totalSharedPaise / 100).toFixed(2)}</Text>
           <Text style={styles.dashboardLabel}>Outstanding split obligations</Text>
-          <Text style={styles.name}>₹{(outstandingTotalPaise / 100).toFixed(2)}</Text>
+          <Text style={styles.name}>₹{(outstandingTotalPaise / 100).toFixed(2)}</Text> */}
           <Text style={styles.dashboardLabel}>You get</Text>
           <Text style={styles.green}>₹{(totalOwed / 100).toFixed(2)}</Text>
 
@@ -197,7 +324,7 @@ export default function FriendsScreen() {
           </Text>
         </View>
 
-        <Text style={styles.subText}>Net settlement suggestions simplify balances across splits; they do not record a payment. Repayments are submitted and approved in each split.</Text>
+        <Text style={styles.subText}>Suggestions are limited to people who are currently accepted friends. Debts involving non-friends remain on their split and are excluded here. Propose a partial or full payment; the recipient selects a receiving account and accepts before ledger and account balances change.</Text>
 
         {/* 🔴 YOU OWE */}
         {Object.entries(oweMap).length > 0 && (
@@ -211,8 +338,11 @@ export default function FriendsScreen() {
                   <Text style={styles.subText}>You owe</Text>
                 </View>
 
-                <View style={{ alignItems: 'flex-end' }}>
+                <View style={{ alignItems: 'flex-end', flexShrink: 0 }}>
                   <Text style={styles.red}>₹{(amount / 100).toFixed(2)}</Text>
+                  <TouchableOpacity onPress={() => openFriendRepayment(userId, amount)}>
+                    <Text style={styles.settleBtn}>Repay / partial</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
             ))}
@@ -250,7 +380,7 @@ export default function FriendsScreen() {
           <TouchableOpacity key={split.id} style={styles.settlementCard} onPress={() => router.push(`/splits/${split.id}`)}>
             <View>
               <Text style={styles.name}>{split.title || 'Shared expense'}</Text>
-              <Text style={styles.subText}>{String(split.status || 'pending').replaceAll('_', ' ')}</Text>
+              {/* <Text style={styles.subText}>{String(split.status || 'pending').replaceAll('_', ' ')}</Text> */}
             </View>
             <Text style={styles.name}>₹{(split.totalAmountInPaise / 100).toFixed(2)}</Text>
           </TouchableOpacity>
@@ -259,10 +389,67 @@ export default function FriendsScreen() {
     );
   };
 
+  const renderSettlements = () => {
+    const userId = currentProfile?.userId;
+    if (!userId) return null;
+    const incoming = friendSettlements.filter((item) => item.status === 'pending' && item.toUserId === userId);
+    const outgoing = friendSettlements.filter((item) => item.status === 'pending' && item.fromUserId === userId);
+    const history = friendSettlements
+      .filter((item) => item.status !== 'pending')
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
+    const empty = (message: string) => <Text style={styles.subText}>{message}</Text>;
+    const card = (item: FriendSettlement, direction: 'incoming' | 'outgoing' | 'history') => (
+      <View key={item.id} style={styles.settlementCard}>
+        <View style={styles.settlementInfo}>
+          <Text style={styles.name}>{direction === 'incoming' ? getName(item.fromUserId) : getName(item.toUserId)}</Text>
+          <Text style={styles.subText}>
+            {direction === 'incoming' ? 'Proposed by friend' : direction === 'outgoing' ? 'Waiting for acceptance' : `Status: ${item.status}`}
+          </Text>
+          {item.note ? <Text style={styles.subText}>{item.note}</Text> : null}
+          {direction === 'incoming' && (!item.fromProfileId || !item.fromAccountId)
+            ? <Text style={styles.subText}>This older request has no funding account. Dismiss it and ask the sender to resend with an account selected.</Text>
+            : null}
+        </View>
+        <View style={styles.settlementActions}>
+          <Text style={item.status === 'accepted' ? styles.green : styles.name}>₹{(item.amountInPaise / 100).toFixed(2)}</Text>
+          {direction === 'incoming' ? (
+            <View style={styles.actionRow}>
+              {item.fromProfileId && item.fromAccountId ? (
+                <TouchableOpacity onPress={() => handleAcceptFriendSettlement(item.id)} style={styles.actionButton}>
+                  <Text style={styles.actionButtonText}>Accept</Text>
+                </TouchableOpacity>
+              ) : null}
+              <TouchableOpacity onPress={() => handleRejectFriendSettlement(item.id)} style={[styles.actionButton, styles.secondaryButton]}>
+                <Text style={[styles.actionButtonText, styles.secondaryButtonText]}>{item.fromProfileId && item.fromAccountId ? 'Reject' : 'Dismiss old request'}</Text>
+              </TouchableOpacity>
+            </View>
+          ) : direction === 'outgoing' ? (
+            <TouchableOpacity onPress={() => handleCancelFriendSettlement(item.id)} style={[styles.actionButton, styles.secondaryButton]}>
+              <Text style={[styles.actionButtonText, styles.secondaryButtonText]}>Cancel request</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      </View>
+    );
+
+    return (
+      <View style={styles.tabContent}>
+        <Text style={styles.sectionTitle}>Incoming requests ({incoming.length})</Text>
+        {incoming.length === 0 ? empty('No payment requests waiting for your acceptance.') : incoming.map((item) => card(item, 'incoming'))}
+        <Text style={styles.sectionTitle}>Sent requests ({outgoing.length})</Text>
+        {outgoing.length === 0 ? empty('You have no pending settlement requests.') : outgoing.map((item) => card(item, 'outgoing'))}
+        <Text style={styles.sectionTitle}>History ({history.length})</Text>
+        {history.length === 0 ? empty('Accepted, rejected, and cancelled requests will appear here.') : history.slice(0, 30).map((item) => card(item, 'history'))}
+      </View>
+    );
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'splits':
         return renderSplits();
+      case 'settlements':
+        return renderSettlements();
       case 'pending':
         return (
           <View style={styles.tabContent}>
@@ -348,7 +535,7 @@ export default function FriendsScreen() {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.tabBar}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabBar} contentContainerStyle={styles.tabBarContent}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'friends' && styles.activeTab]}
           onPress={() => setActiveTab('friends')}
@@ -401,7 +588,15 @@ export default function FriendsScreen() {
             Splits ({splits.length})
           </Text>
         </TouchableOpacity>
-      </View>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'settlements' && styles.activeTab]}
+          onPress={() => setActiveTab('settlements')}
+        >
+          <Text style={[styles.tabText, activeTab === 'settlements' && styles.activeTabText]}>
+            Payments ({friendSettlements.filter((item) => item.status === 'pending' && item.toUserId === currentProfile?.userId).length})
+          </Text>
+        </TouchableOpacity>
+      </ScrollView>
 
       <ScrollView
         style={styles.list}
@@ -414,11 +609,72 @@ export default function FriendsScreen() {
       >
         {renderContent()}
       </ScrollView>
+
+      <Modal transparent visible={!!repaymentTarget} animationType="fade" onRequestClose={() => setRepaymentTarget(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Propose repayment</Text>
+            <Text style={styles.subText}>To {repaymentTarget ? getName(repaymentTarget.userId) : ''}. Outstanding: ₹{((repaymentTarget?.maxPaise ?? 0) / 100).toFixed(2)}. You can pay part of it.</Text>
+            <TextInput
+              value={repaymentAmount}
+              onChangeText={setRepaymentAmount}
+              keyboardType="decimal-pad"
+              placeholder="Amount (₹)"
+              style={styles.amountInput}
+            />
+            <Text style={styles.subText}>Pay from account</Text>
+            {accounts.map((account) => (
+              <TouchableOpacity
+                key={account.id}
+                style={[styles.accountChoice, selectedPayerAccountId === account.id && styles.accountChoiceSelected]}
+                onPress={() => setSelectedPayerAccountId(account.id)}
+              >
+                <Text style={styles.name}>{account.name}</Text>
+                <Text style={styles.subText}>Balance ₹{Number(account.balance || 0).toFixed(2)}{selectedPayerAccountId === account.id ? ' · Selected' : ''}</Text>
+              </TouchableOpacity>
+            ))}
+            <View style={styles.modalActions}>
+              <TouchableOpacity onPress={() => setRepaymentTarget(null)} disabled={submittingRepayment}><Text style={styles.subText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity onPress={submitFriendRepayment} disabled={submittingRepayment}><Text style={styles.settleBtn}>{submittingRepayment ? 'Sending…' : 'Send request'}</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal transparent visible={!!acceptSettlementTarget} animationType="fade" onRequestClose={() => setAcceptSettlementTarget(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Choose receiving account</Text>
+            <Text style={styles.subText}>The accepted payment will be recorded as income and credited to the account you select.</Text>
+            {accounts.map((account) => (
+              <TouchableOpacity
+                key={account.id}
+                style={styles.accountChoice}
+                disabled={acceptingSettlement}
+                onPress={() => void confirmAcceptFriendSettlement(account.id)}
+              >
+                <Text style={styles.name}>{account.name}</Text>
+                <Text style={styles.subText}>Balance ₹{Number(account.balance || 0).toFixed(2)}</Text>
+              </TouchableOpacity>
+            ))}
+            <View style={styles.modalActions}>
+              <TouchableOpacity onPress={() => setAcceptSettlementTarget(null)} disabled={acceptingSettlement}><Text style={styles.subText}>Cancel</Text></TouchableOpacity>
+              {acceptingSettlement ? <Text style={styles.settleBtn}>Accepting…</Text> : null}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', padding: 24 },
+  modalCard: { backgroundColor: colors.background, borderRadius: 14, padding: 20, gap: 12 },
+  accountChoice: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 12, gap: 3 },
+  accountChoiceSelected: { borderColor: colors.primary, backgroundColor: colors.primary + '12' },
+  amountInput: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: colors.text },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 24, marginTop: 8 },
   container: {
     flex: 1,
     backgroundColor: colors.background,
@@ -444,17 +700,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   tabBar: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingBottom: 12,
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 50,
     borderBottomColor: colors.border,
     borderBottomWidth: 1,
   },
+  tabBarContent: {
+    flexDirection: 'row',
+    paddingHorizontal: 12,
+  },
   tab: {
-    flex: 1,
+    minWidth: 88,
     paddingVertical: 12,
-    paddingHorizontal: 8,
-    marginHorizontal: 4,
+    paddingHorizontal: 10,
+    marginHorizontal: 3,
     borderBottomWidth: 2,
     borderBottomColor: 'transparent',
     alignItems: 'center',
@@ -500,6 +760,39 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+  },
+  settlementInfo: {
+    flex: 1,
+    gap: 3,
+  },
+  settlementActions: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  actionButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  actionButtonText: {
+    color: colors.card,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  secondaryButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  secondaryButtonText: {
+    color: colors.text,
   },
 
   detailsBtn: {
