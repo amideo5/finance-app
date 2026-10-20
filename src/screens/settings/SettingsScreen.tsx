@@ -11,7 +11,6 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { signOut, user } = useAuth();
   const { profiles, currentProfile, switchProfile } = useProfile();
-
   const handleSignOut = () => {
     Alert.alert(
       'Sign Out',
@@ -28,6 +27,7 @@ export default function SettingsScreen() {
       ]
     );
   };
+
 
   return (
     <ScrollView style={styles.container}>
@@ -105,6 +105,7 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </Card>
       </View>
+
     </ScrollView>
   );
 }

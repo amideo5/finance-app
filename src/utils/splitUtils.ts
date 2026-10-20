@@ -3,6 +3,7 @@ import type {
   SplitObligation,
   SplitParticipant,
   SplitSettlement,
+  FriendSettlement,
 } from '@/types/finance';
 
 export interface SettlementSuggestion {
@@ -112,6 +113,35 @@ export function calculateNetBalances(
   }
   const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
   if (total !== 0) throw new Error(`Split balances do not reconcile to zero (${total} paise).`);
+  return balances;
+}
+
+
+/**
+ * Calculate network-wide net balances after accepted split repayments and
+ * accepted friend-level payments. Pending requests reserve capacity on the
+ * server but never count as money paid. Positive = should receive; negative = owes.
+ */
+export function calculateFriendNetBalances(
+  splits: SharedExpenseSplit[],
+  splitSettlements: SplitSettlement[] = [],
+  friendSettlements: FriendSettlement[] = [],
+): Record<string, number> {
+  const balances = calculateNetBalances(splits, splitSettlements);
+  for (const settlement of friendSettlements) {
+    if (settlement.status !== 'accepted') continue;
+    if (!Number.isSafeInteger(settlement.amountInPaise) || settlement.amountInPaise <= 0) {
+      throw new Error('Accepted friend settlements must have a positive whole-paise amount.');
+    }
+    if (!settlement.fromUserId || !settlement.toUserId || settlement.fromUserId === settlement.toUserId) {
+      throw new Error('Accepted friend settlement has invalid participants.');
+    }
+    // A global payment reduces the payer's debt and the recipient's credit.
+    balances[settlement.fromUserId] = (balances[settlement.fromUserId] || 0) + settlement.amountInPaise;
+    balances[settlement.toUserId] = (balances[settlement.toUserId] || 0) - settlement.amountInPaise;
+  }
+  const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
+  if (total !== 0) throw new Error(`Friend net balances do not reconcile to zero (${total} paise).`);
   return balances;
 }
 

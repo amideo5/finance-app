@@ -48,7 +48,7 @@ export default function SignupScreen() {
     if (signUpError) {
       setError(signUpError.message);
     } else {
-      router.replace('/(tabs)');
+      router.replace('/auth/login');
     }
   };
 

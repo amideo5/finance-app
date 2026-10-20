@@ -25,6 +25,7 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+let isSigningUp = false;
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -38,6 +39,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // This will fire immediately with the current auth state
     // Firebase will automatically restore the session if it exists
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (isSigningUp) {
+        return; 
+      }
       setUser(firebaseUser);
 
       if (firebaseUser) {
@@ -66,6 +70,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // --------------------------------------------
   const signUp = async (email: string, password: string, name: string) => {
     try {
+      isSigningUp = true; 
       const result = await createUserWithEmailAndPassword(auth, email, password);
       const uid = result.user.uid;
 
@@ -88,6 +93,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         createdAt: new Date(),
         updatedAt: new Date(),
       });
+
+      await firebaseSignOut(auth);
+      isSigningUp = false; 
 
       return { error: null };
     } catch (error) {
