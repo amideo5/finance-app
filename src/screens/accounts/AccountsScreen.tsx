@@ -1,7 +1,7 @@
 import AccountCard from '@/src/components/finance/AccountCard';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { getAccounts } from '@/src/services/firebase/accountsService';
+import { backfillCashTransactions, getAccounts, getOrCreateCashAccount } from '@/src/services/firebase/accountsService';
 import { FinanceAccount } from '@/types/finance';
 import { useRouter } from 'expo-router';
 import { Plus } from 'lucide-react-native';
@@ -13,6 +13,21 @@ export default function AccountsScreen() {
   const { currentProfile } = useProfile();
   const [accounts, setAccounts] = useState<FinanceAccount[]>([]);
   const [loading, setLoading] = useState(false);
+
+  const linkHistoricalCash = async () => {
+    if (!currentProfile) return;
+    try {
+      const cash = await getOrCreateCashAccount(currentProfile.id, currentProfile.currency || 'INR');
+      const linked = await backfillCashTransactions(currentProfile.id, cash.id);
+      await loadAccounts();
+      Alert.alert('Historical cash transactions', linked
+        ? `Linked ${linked} previous cash transaction(s) to Cash. Balances were not changed.`
+        : 'No unlinked cash transactions were found.');
+    } catch (error) {
+      console.error('Cash transaction migration failed:', error);
+      Alert.alert('Migration failed', 'Could not link historical cash transactions. Please try again.');
+    }
+  };
 
   const loadAccounts = useCallback(async () => {
     if (!currentProfile) return;
@@ -45,6 +60,18 @@ export default function AccountsScreen() {
           <Plus color={colors.card} size={24} />
         </TouchableOpacity>
       </View>
+
+      <TouchableOpacity style={styles.migrationButton} onPress={() => router.push('/accounts/historical')}>
+        <Text style={styles.migrationText}>Assign accounts to historical transactions</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={styles.migrationButton} onPress={() => Alert.alert(
+        'Link previous cash transactions?',
+        'This will associate unlinked transactions marked Cash with your Cash account. It will not change balances. Other payment methods need account-by-account review.',
+        [{ text: 'Cancel', style: 'cancel' }, { text: 'Link cash transactions', onPress: () => { void linkHistoricalCash(); } }],
+      )}>
+        <Text style={styles.migrationText}>Link previous cash transactions</Text>
+      </TouchableOpacity>
 
       <ScrollView
         style={styles.list}
@@ -96,6 +123,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  migrationButton: { marginHorizontal: 24, marginBottom: 8, paddingVertical: 10 },
+  migrationText: { color: colors.primary, fontWeight: '600' },
   list: {
     flex: 1,
     paddingHorizontal: 24,

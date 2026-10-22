@@ -13,6 +13,7 @@ import {
 } from '@/src/firebaseConfig';
 
 import { addTransaction } from '@/src/services/firebase/transactionsService';
+import { getOrCreateCashAccount } from '@/src/services/firebase/accountsService';
 import { isDateKey, parsePositiveAmount, toLocalDateKey } from '@/src/utils/validation';
 import { collection, getDocs } from 'firebase/firestore';
 
@@ -56,12 +57,18 @@ export default function AddExpenseScreen() {
 
       const result: any[] = [];
       snapshot.forEach((doc) => result.push({ id: doc.id, ...doc.data() }));
-
+      let cash = result.find((account) => account.type === 'cash' && String(account.name || '').toLowerCase() === 'cash')
+        || result.find((account) => account.type === 'cash');
+      if (!cash) {
+        cash = await getOrCreateCashAccount(currentProfile.id, currentProfile.currency || 'INR');
+        result.push(cash);
+      }
       setAccounts(result);
+      if (selectedPaymentMode === 'cash') setSelectedAccount(cash.id);
     } catch (e) {
       console.log("Account Load Error:", e);
     }
-  }, [currentProfile]);
+  }, [currentProfile, selectedPaymentMode]);
 
   useEffect(() => {
     if (currentProfile) {
@@ -81,6 +88,16 @@ export default function AddExpenseScreen() {
       Alert.alert('Check transaction details', 'Enter a positive amount and choose a category.');
       return;
     }
+    const accountForPayment = selectedPaymentMode === 'cash'
+      ? accounts.find((account) => account.type === 'cash' && String(account.name || '').toLowerCase() === 'cash')
+        || accounts.find((account) => account.type === 'cash')
+      : accounts.find((account) => account.id === selectedAccount);
+    if (!accountForPayment) {
+      Alert.alert('Choose an account', selectedPaymentMode === 'cash'
+        ? 'Create or select the dedicated Cash account first.'
+        : 'Select the bank, card, or wallet account used for this transaction.');
+      return;
+    }
     if (!isDateKey(date)) {
       Alert.alert('Invalid date', 'Enter a valid date in YYYY-MM-DD format.');
       return;
@@ -98,7 +115,7 @@ export default function AddExpenseScreen() {
         category: selectedCategory.name,
         categoryIcon: selectedCategory.icon,
         paymentMode: selectedPaymentMode,
-        accountId: selectedAccount,
+        accountId: accountForPayment.id,
         notes: notes.trim() || null,
         date,
         currency: currentProfile.currency || 'INR',
@@ -214,7 +231,15 @@ export default function AddExpenseScreen() {
                 styles.paymentMode,
                 selectedPaymentMode === mode && styles.paymentModeSelected,
               ]}
-              onPress={() => setSelectedPaymentMode(mode)}
+              onPress={() => {
+              setSelectedPaymentMode(mode);
+              if (mode !== 'cash') setSelectedAccount(null);
+              else {
+                const cash = accounts.find((account) => account.type === 'cash' && String(account.name || '').toLowerCase() === 'cash')
+                  || accounts.find((account) => account.type === 'cash');
+                setSelectedAccount(cash?.id ?? null);
+              }
+            }}
             >
               <Text
                 style={[
@@ -231,9 +256,11 @@ export default function AddExpenseScreen() {
         {/* ACCOUNTS */}
         {accounts.length > 0 && (
           <>
-            <Text style={styles.label}>Account</Text>
+            <Text style={styles.label}>{selectedPaymentMode === 'cash' ? 'Cash account' : 'Account'}</Text>
             <View style={styles.accounts}>
-              {accounts.map((account) => (
+              {accounts.filter((account) => selectedPaymentMode === 'cash'
+                ? account.type === 'cash'
+                : account.type !== 'cash').map((account) => (
                 <TouchableOpacity
                   key={account.id}
                   style={[
@@ -241,6 +268,7 @@ export default function AddExpenseScreen() {
                     selectedAccount === account.id && styles.accountItemSelected,
                   ]}
                   onPress={() => setSelectedAccount(account.id)}
+                  disabled={selectedPaymentMode === 'cash'}
                 >
                   <Text style={styles.accountName}>{account.name}</Text>
                 </TouchableOpacity>
