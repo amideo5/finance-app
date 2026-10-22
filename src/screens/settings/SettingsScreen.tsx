@@ -5,7 +5,7 @@ import Card from '@/src/components/ui/Card';
 import { colors } from '@/src/constants/colors';
 import { useAuth } from '@/src/context/AuthContext';
 import { useProfile } from '@/src/context/ProfileContext';
-import { ChevronRight, User, Lock, Settings, LogOut } from 'lucide-react-native';
+import { ChevronRight, User, Lock, Settings, LogOut, Plus } from 'lucide-react-native';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -36,7 +36,7 @@ export default function SettingsScreen() {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Profile</Text>
+        {/* <Text style={styles.sectionTitle}>Profile</Text> */}
         <Card padding={0}>
           <TouchableOpacity style={styles.settingItem}
               onPress={() => router.push('/settings/account')}>
@@ -76,6 +76,18 @@ export default function SettingsScreen() {
               )}
             </TouchableOpacity>
           ))}
+          <TouchableOpacity
+            style={[styles.settingItem, styles.addProfileItem]}
+            onPress={() => router.push('/settings/profiles/new')}
+            accessibilityRole="button"
+            accessibilityLabel="Create another finance profile"
+          >
+            <View style={styles.settingLeft}>
+              <Plus color={colors.primary} size={22} />
+              <Text style={[styles.settingLabel, { marginLeft: 12 }]}>Add profile</Text>
+            </View>
+            <ChevronRight color={colors.textSecondary} size={20} />
+          </TouchableOpacity>
         </Card>
       </View>
 
@@ -164,6 +176,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     padding: 16,
+  },
+  addProfileItem: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
   },
   profileItemBorder: {
     borderBottomWidth: 1,
