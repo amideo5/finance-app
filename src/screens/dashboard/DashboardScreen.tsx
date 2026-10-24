@@ -53,7 +53,7 @@ export default function DashboardScreen() {
       const previousStartKey = toLocalDateKey(previousMonth);
       const previousEndKey = toLocalDateKey(previousMonthLast);
 
-      const [incomeTotalSnapshot, expenseTotalSnapshot, repaymentSnapshot, monthSnapshot, previousSnapshot, budgetsSnapshot, splits] = await Promise.all([
+      const [incomeTotalSnapshot, expenseTotalSnapshot, repaymentSnapshot, monthSnapshot, previousSnapshot, budgetsSnapshot, splits, bankSnapshot] = await Promise.all([
         getAggregateFromServer(query(transactionCollection, where('type', '==', 'income')), { total: sum('amount') }),
         getAggregateFromServer(query(transactionCollection, where('type', '==', 'expense')), { total: sum('amount') }),
         getDocs(query(transactionCollection, where('kind', '==', 'repayment'))),
@@ -70,6 +70,7 @@ export default function DashboardScreen() {
         )),
         getDocs(collection(db, 'profiles', currentProfile.id, 'budgets')),
         getUserSplits(currentProfile.userId),
+        getDocs(query(collection(db, 'profiles', currentProfile.id, 'accounts'))),
       ]);
       if (requestId !== requestVersion.current) return;
 
@@ -79,26 +80,37 @@ export default function DashboardScreen() {
         .filter((transaction) => transaction.type === 'income')
         .reduce((sum, transaction) => sum + (Number.isSafeInteger(transaction.amountInPaise)
           ? transaction.amountInPaise : Math.round(Number(transaction.amount || 0) * 100)), 0);
-      // console.log('Repayment income (paise):', repaymentIncomePaise);
+      // console.log('Repayment income (paise):', repaymentIncomePaise/100);
       const repaymentExpensePaise = repayments
         .filter((transaction) => transaction.type === 'expense')
         .reduce((sum, transaction) => sum + (Number.isSafeInteger(transaction.amountInPaise)
           ? transaction.amountInPaise : Math.round(Number(transaction.amount || 0) * 100)), 0);
-      // console.log('Repayment expense (paise):', repaymentExpensePaise);
+      // console.log('Repayment expense (paise):', repaymentExpensePaise/100);
       const excludedSourcePaise = getExcludedSourceAmountInPaise(splits, currentProfile.id);
       // console.log('Excluded source (paise):', excludedSourcePaise / 100);
       // Repayments are transfers between accounts, not new income or spending.
-      const incomeTotalPaise = Math.max(0, Math.round(Number(incomeTotalSnapshot.data().total || 0) * 100) - repaymentIncomePaise);
+      const incomeTotalPaise = Math.max(0, Math.round(Number(incomeTotalSnapshot.data().total || 0) * 100) 
+      // + repaymentIncomePaise
+    );
       const expenseTotalPaise = Math.max(0,
         Math.round(Number(expenseTotalSnapshot.data().total || 0) * 100)
-        - repaymentExpensePaise
+        // + repaymentExpensePaise
         // - excludedSourcePaise
         ,
       );
       // console.log('Income total (paise):', incomeTotalPaise / 100);
+      // console.log('Income snapshot :', incomeTotalSnapshot.data().total || 0);
       // console.log('Expense total (paise):', expenseTotalPaise / 100);
       // console.log('Balance (₹):', (incomeTotalPaise - expenseTotalPaise) / 100);
-      setBalance((incomeTotalPaise - expenseTotalPaise) / 100);
+      
+      const totalBalance = bankSnapshot.docs.reduce((sum, accountDoc) => {
+        const accountData = accountDoc.data();
+        const accountBalance = Number.isSafeInteger(accountData.balanceInPaise)
+          ? accountData.balanceInPaise : Math.round(Number(accountData.balance || 0) * 100);
+        return sum + accountBalance;
+      }, 0) / 100;
+      // console.log('Total balance from accounts (₹):', totalBalance);
+      setBalance(totalBalance);
 
       const transactions = monthSnapshot.docs.map((transactionDoc) => ({
         id: transactionDoc.id,

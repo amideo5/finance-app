@@ -37,15 +37,15 @@ export function generateInsights(
   const insights: Insight[] = [];
 
   const currentMonthExpenses = transactions
-    .filter(t => t.type === 'expense' && t.kind !== 'repayment')
+    .filter(t => t.type === 'expense' )
     .reduce((sum, t) => sum + Math.round(t.amount * 100), 0);
 
   const currentMonthIncome = transactions
-    .filter(t => t.type === 'income' && t.kind !== 'repayment')
+    .filter(t => t.type === 'income' )
     .reduce((sum, t) => sum + Math.round(t.amount * 100), 0);
 
   const previousMonthExpenses = previousMonthTransactions
-    .filter(t => t.type === 'expense' && t.kind !== 'repayment')
+    .filter(t => t.type === 'expense' )
     .reduce((sum, t) => sum + Math.round(t.amount * 100), 0);
 
   if (previousMonthExpenses > 0) {
@@ -93,7 +93,7 @@ export function generateInsights(
   }
 
   const categoryExpenses = new Map<string, number>();
-  transactions.filter(t => t.type === 'expense' && t.kind !== 'repayment').forEach(t => {
+  transactions.filter(t => t.type === 'expense' ).forEach(t => {
     const categoryNameId = t.category ? categoryIdsByName.get(t.category.toLowerCase()) : undefined;
     const categoryId = t.categoryId || t.category_id || categoryNameId || t.category || 'uncategorized';
     const current = categoryExpenses.get(categoryId) || 0;

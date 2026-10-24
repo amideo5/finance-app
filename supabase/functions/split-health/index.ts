@@ -682,6 +682,49 @@ async function getAcceptedFriendshipKeysInTransaction(transactionId: string): Pr
  * still exist. Non-friend split debts remain in the split ledger unchanged,
  * but they cannot offset a user's friend-only settlement capacity.
  */
+/**
+ * Outstanding net amount between one specific friend pair. This is deliberately
+ * bilateral: a third friend's credit cannot reduce this pair's debt.
+ */
+async function getBilateralFriendDebtInTransaction(
+  fromUserId: string,
+  toUserId: string,
+  transactionId: string,
+  excludePendingSettlementId?: string,
+): Promise<number> {
+  const [splitDocs, settlementDocs, friendKeys] = await Promise.all([
+    queryEntireCollectionInTransaction("splits", transactionId),
+    queryEntireCollectionInTransaction("friendSettlements", transactionId),
+    getAcceptedFriendshipKeysInTransaction(transactionId),
+  ]);
+  if (!friendKeys.has(friendshipKey(fromUserId, toUserId))) {
+    throw new Error("Repayments are allowed only between accepted friends");
+  }
+  let debt = 0;
+  for (const doc of splitDocs) {
+    const split = fsDocData(doc);
+    if (split.status === "cancelled") continue;
+    const obligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>> : [];
+    for (const item of obligations) {
+      if (item.fromUserId !== fromUserId || item.toUserId !== toUserId) continue;
+      const total = assertPaise(item.amountInPaise, "Split obligation", true);
+      const accepted = assertPaise(item.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
+      const pending = assertPaise(item.pendingAmountInPaise ?? 0, "Pending split repayment", true);
+      debt += Math.max(0, total - accepted - pending);
+    }
+  }
+  for (const doc of settlementDocs) {
+    const item = fsDocData(doc);
+    if (doc.name?.split("/").at(-1) === excludePendingSettlementId) continue;
+    if (item.fromUserId !== fromUserId || item.toUserId !== toUserId) continue;
+    const amount = assertPaise(item.amountInPaise, "Friend settlement amount", true);
+    if (item.status === "accepted") debt -= amount;
+    else if (item.status === "pending") debt -= amount;
+  }
+  return Math.max(0, debt);
+}
+
 async function getFriendOnlyNetBalancesInTransaction(
   transactionId: string,
 ): Promise<{ balances: Record<string, number>; friendKeys: Set<string> }> {
@@ -740,78 +783,71 @@ async function getFriendOnlyNetBalancesInTransaction(
  * only where an accepted friendship exists. This avoids arbitrary A-to-D
  * suggestions just because A and D appear in the same split network.
  */
-function simplifyFriendOnlyBalances(
-  balances: Record<string, number>,
+/**
+ * Produce repayment suggestions by netting obligations only bilaterally.
+ *
+ * Do not first collapse every person's obligations into one global balance:
+ * that lets a credit from friend A reduce a debt to friend B, even when A and
+ * B are not friends. Pairwise netting preserves each friendship's own ledger.
+ */
+function simplifyFriendPairObligations(
+  splitDocs: FsDoc[],
+  friendSettlementDocs: FsDoc[],
   friendKeys: Set<string>,
 ): Array<{ fromUserId: string; toUserId: string; amountInPaise: number }> {
-  const debtors = Object.entries(balances).filter(([, amount]) => amount < 0)
-    .map(([userId, amount]) => ({ userId, amount: -amount })).sort((a, b) => a.userId.localeCompare(b.userId));
-  const creditors = Object.entries(balances).filter(([, amount]) => amount > 0)
-    .map(([userId, amount]) => ({ userId, amount })).sort((a, b) => a.userId.localeCompare(b.userId));
-  const totalDebt = debtors.reduce((sum, item) => sum + item.amount, 0);
-  if (totalDebt !== creditors.reduce((sum, item) => sum + item.amount, 0)) {
-    throw new Error("Friend-only balances do not reconcile");
-  }
-  if (!totalDebt) return [];
-
-  const source = 0;
-  const debtorStart = 1;
-  const creditorStart = debtorStart + debtors.length;
-  const sink = creditorStart + creditors.length;
-  const size = sink + 1;
-  const capacity = Array.from({ length: size }, () => Array<number>(size).fill(0));
-  const residual = Array.from({ length: size }, () => Array<number>(size).fill(0));
-  const neighbors = Array.from({ length: size }, () => new Set<number>());
-  const addEdge = (from: number, to: number, amount: number) => {
-    capacity[from][to] += amount;
-    residual[from][to] += amount;
-    neighbors[from].add(to);
-    neighbors[to].add(from);
+  const pairBalances = new Map<string, { first: string; second: string; signed: number }>();
+  const pairFor = (a: string, b: string) => {
+    const [first, second] = [a, b].sort((x, y) => x.localeCompare(y));
+    const key = `${first}\u0000${second}`;
+    let pair = pairBalances.get(key);
+    if (!pair) {
+      pair = { first, second, signed: 0 };
+      pairBalances.set(key, pair);
+    }
+    return pair;
   };
-  debtors.forEach((debtor, i) => addEdge(source, debtorStart + i, debtor.amount));
-  creditors.forEach((creditor, j) => addEdge(creditorStart + j, sink, creditor.amount));
-  debtors.forEach((debtor, i) => creditors.forEach((creditor, j) => {
-    if (friendKeys.has(friendshipKey(debtor.userId, creditor.userId))) {
-      addEdge(debtorStart + i, creditorStart + j, totalDebt);
-    }
-  }));
 
-  while (true) {
-    const parent = Array<number>(size).fill(-1);
-    parent[source] = source;
-    const queue = [source];
-    for (let q = 0; q < queue.length && parent[sink] === -1; q++) {
-      const node = queue[q];
-      for (const next of neighbors[node]) {
-        if (parent[next] === -1 && residual[node][next] > 0) {
-          parent[next] = node;
-          queue.push(next);
-          if (next === sink) break;
-        }
-      }
+  for (const doc of splitDocs) {
+    const split = fsDocData(doc);
+    if (split.status === "cancelled") continue;
+    const obligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>>
+      : [];
+    for (const obligation of obligations) {
+      const from = typeof obligation.fromUserId === "string" ? obligation.fromUserId : "";
+      const to = typeof obligation.toUserId === "string" ? obligation.toUserId : "";
+      if (!from || !to || from === to || !friendKeys.has(friendshipKey(from, to))) continue;
+      const amount = assertPaise(obligation.amountInPaise, "Split obligation", true)
+        - assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
+      if (amount <= 0) continue;
+      const pair = pairFor(from, to);
+      pair.signed += from === pair.first ? amount : -amount;
     }
-    if (parent[sink] === -1) break;
-    let flow = Number.MAX_SAFE_INTEGER;
-    for (let node = sink; node !== source; node = parent[node]) {
-      flow = Math.min(flow, residual[parent[node]][node]);
-    }
-    for (let node = sink; node !== source; node = parent[node]) {
-      residual[parent[node]][node] -= flow;
-      residual[node][parent[node]] += flow;
-    }
+  }
+
+  // Accepted friend settlements reduce only the debt between those two friends.
+  for (const doc of friendSettlementDocs) {
+    const settlement = fsDocData(doc);
+    if (settlement.status !== "accepted") continue;
+    const from = typeof settlement.fromUserId === "string" ? settlement.fromUserId : "";
+    const to = typeof settlement.toUserId === "string" ? settlement.toUserId : "";
+    if (!from || !to || from === to || !friendKeys.has(friendshipKey(from, to))) continue;
+    const amount = assertPaise(settlement.amountInPaise, "Accepted friend settlement", true);
+    const pair = pairFor(from, to);
+    pair.signed += from === pair.first ? -amount : amount;
   }
 
   const suggestions: Array<{ fromUserId: string; toUserId: string; amountInPaise: number }> = [];
-  debtors.forEach((debtor, i) => creditors.forEach((creditor, j) => {
-    const from = debtorStart + i;
-    const to = creditorStart + j;
-    const originalCapacity = capacity[from][to];
-    if (!originalCapacity) return;
-    const amountInPaise = originalCapacity - residual[from][to];
-    if (amountInPaise > 0) suggestions.push({ fromUserId: debtor.userId, toUserId: creditor.userId, amountInPaise });
-  }));
+  for (const pair of pairBalances.values()) {
+    if (pair.signed > 0) {
+      suggestions.push({ fromUserId: pair.first, toUserId: pair.second, amountInPaise: pair.signed });
+    } else if (pair.signed < 0) {
+      suggestions.push({ fromUserId: pair.second, toUserId: pair.first, amountInPaise: -pair.signed });
+    }
+  }
   return suggestions.sort((a, b) => a.fromUserId.localeCompare(b.fromUserId) || a.toUserId.localeCompare(b.toUserId));
 }
+
 
 /**
  * Return only the connected shared-expense network containing uid. A split
@@ -882,7 +918,11 @@ async function getNetworkNetBalancesForUser(
     for (const userId of networkUserIds) balances[userId] = friendLedger.balances[userId] ?? 0;
     const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
     if (total !== 0) throw new Error(`The connected friend-only network does not reconcile (${total} paise)`);
-    const suggestions = simplifyFriendOnlyBalances(balances, friendLedger.friendKeys);
+    const [splitDocs, friendSettlementDocs] = await Promise.all([
+      queryEntireCollectionInTransaction("splits", transactionId),
+      queryEntireCollectionInTransaction("friendSettlements", transactionId),
+    ]);
+    const suggestions = simplifyFriendPairObligations(splitDocs, friendSettlementDocs, friendLedger.friendKeys);
     await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) });
     return { balances, suggestions };
   } catch (error) {
@@ -1034,14 +1074,9 @@ async function requestFriendSettlement(
     if (!networkUserIds.has(toUserId)) {
       throw new Error("The recipient is not part of your connected shared-expense network");
     }
-    const { balances } = await getFriendOnlyNetBalancesInTransaction(transactionId);
-    const reservations = await getNetworkReservationsInTransaction(transactionId);
-    const debtorCapacity = availableDebtorCapacity(uid, balances, reservations);
-    const creditorCapacity = availableCreditorCapacity(toUserId, balances, reservations);
-    const available = Math.min(debtorCapacity, creditorCapacity);
-
-    if ((balances[uid] ?? 0) >= 0 || (balances[toUserId] ?? 0) <= 0 || available <= 0) {
-      throw new Error("The simplified balances do not show that you owe this friend");
+    const available = await getBilateralFriendDebtInTransaction(uid, toUserId, transactionId);
+    if (available <= 0) {
+      throw new Error("The friend-to-friend ledger does not show that you owe this friend");
     }
     if (amountInPaise > available) {
       throw new Error(`Amount exceeds the available net settlement balance of ₹${(available / 100).toFixed(2)}`);
@@ -1118,14 +1153,10 @@ async function acceptFriendSettlement(
     if (!recipientProfileDoc || fsDocData(recipientProfileDoc).userId !== uid) throw new Error("The selected receiving profile does not belong to you");
     if (!recipientAccountDoc) throw new Error("The selected receiving account was not found");
 
-    const { balances } = await getFriendOnlyNetBalancesInTransaction(transactionId);
-    const reservations = await getNetworkReservationsInTransaction(transactionId, { friendSettlementId: settlementId });
-    const available = Math.min(
-      availableDebtorCapacity(fromUserId, balances, reservations),
-      availableCreditorCapacity(uid, balances, reservations),
-    );
-    if ((balances[fromUserId] ?? 0) >= 0 || (balances[uid] ?? 0) <= 0 || amountInPaise > available) {
-      throw new Error("The friend-only balance changed. This request can no longer be accepted for that amount.");
+    // Exclude this request from pending reservations when validating acceptance.
+    const available = await getBilateralFriendDebtInTransaction(fromUserId, uid, transactionId, settlementId);
+    if (amountInPaise > available) {
+      throw new Error("The bilateral friend balance changed. This request can no longer be accepted for that amount.");
     }
 
     const payerAccount = fsDocData(payerAccountDoc);
