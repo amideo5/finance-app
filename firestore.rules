@@ -98,7 +98,26 @@ service cloud.firestore {
         allow read: if canAccessProfile(profileId);
         allow create:
           if canEditProfile(profileId)
-          && !request.resource.data.keys().hasAny(['kind', 'splitId', 'settlementId', 'serverGenerated']);
+          && (
+            // Ordinary transactions must not contain reserved fields.
+            !request.resource.data.keys().hasAny([
+              'kind', 'splitId', 'settlementId', 'serverGenerated'
+            ])
+
+            // Permit only a specifically shaped self-transfer.
+            || (
+              request.resource.data.kind == 'self-transfer'
+              && request.resource.data.type in ['income', 'expense']
+              && request.resource.data.transferDirection in ['in', 'out']
+              && request.resource.data.transferId is string
+              && request.resource.data.amount is number
+              && request.resource.data.amount > 0
+              && request.resource.data.accountId is string
+              && exists(
+                /databases/$(database)/documents/profiles/$(profileId)/accounts/$(request.resource.data.accountId)
+              )
+            )
+          );
 
         allow update:
           if canEditProfile(profileId)

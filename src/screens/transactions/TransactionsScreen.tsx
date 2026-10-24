@@ -120,9 +120,14 @@ export default function TransactionsScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Transactions</Text>
 
-        <TouchableOpacity onPress={() => setFilterVisible(true)}>
-          <Text style={styles.filterBtn}>Filter</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 16 }}>
+          <TouchableOpacity onPress={() => router.push('/transactions/self-transfer')}>
+            <Text style={styles.filterBtn}>Transfer</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setFilterVisible(true)}>
+            <Text style={styles.filterBtn}>Filter</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* ACTIVE FILTER INDICATOR */}
@@ -150,7 +155,11 @@ export default function TransactionsScreen() {
           <TransactionItem
             type={transaction.type}
             kind={transaction.kind}
-            category={transaction.category || 'Unknown'}
+            category={
+              transaction.kind === 'self-transfer'
+                ? transaction.title || 'Transfer'
+                : transaction.category || 'Unknown'
+            }
             amount={transaction.amount}
             date={transaction.date}
             notes={transaction.notes}
