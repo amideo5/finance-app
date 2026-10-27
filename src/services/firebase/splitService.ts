@@ -4,6 +4,7 @@ import type {
   SharedExpenseSplit,
   SplitParticipant,
   SplitSettlement,
+  UnresolvedFriendObligation,
 } from '@/types/finance';
 import type { SettlementSuggestion } from '@/src/utils/splitUtils';
 import { auth, db } from '@/src/firebaseConfig';
@@ -142,13 +143,23 @@ export async function getFriendSettlements(userId: string): Promise<FriendSettle
 export async function getFriendNetBalances(userId: string): Promise<{
   balances: Record<string, number>;
   suggestions: SettlementSuggestion[];
+  unresolvedObligations: UnresolvedFriendObligation[];
+  algorithmVersion: number;
 }> {
   const result = await callSupabaseSplitFunction<Record<string, never>, {
     balances: Record<string, number>;
     suggestions: SettlementSuggestion[];
+    unresolvedObligations: UnresolvedFriendObligation[];
+    algorithmVersion: number;
   }>('getNetworkNetBalances', {});
-  if (!result.balances || typeof result.balances[userId] !== 'number' || !Array.isArray(result.suggestions)) {
-    throw new Error('Supabase did not return friend-only net balances and safe settlement suggestions. Deploy the updated split-health Edge Function.');
+  if (
+    !result.balances
+    || typeof result.balances[userId] !== 'number'
+    || !Array.isArray(result.suggestions)
+    || !Array.isArray(result.unresolvedObligations)
+    || result.algorithmVersion !== 3
+  ) {
+    throw new Error('The split service is outdated or returned incomplete settlement data. Deploy the updated supabase/functions/split-health Edge Function (algorithm version 3) before using friend settlement suggestions.');
   }
   return result;
 }

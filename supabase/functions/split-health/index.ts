@@ -1,5 +1,6 @@
 
 import { importPKCS8, importX509, SignJWT, jwtVerify } from "npm:jose@6";
+import { buildMutualFriendshipKeys, calculateFriendshipAwarePlan, deduplicateFriendSettlementRecords, getCompleteFriendshipCliqueForPair, getCliqueSettlementCapacity } from "../_shared/settlement.ts";
 
 const projectId = Deno.env.get("FIREBASE_PROJECT_ID");
 const serviceAccountB64 = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64");
@@ -481,6 +482,14 @@ function assertPaise(value: unknown, label: string, allowZero = false): number {
   return value;
 }
 
+function addSafePaise(current: number, delta: number, label: string): number {
+  const next = current + delta;
+  if (!Number.isSafeInteger(next)) {
+    throw new Error(`${label} exceeds the safe whole-paise range`);
+  }
+  return next;
+}
+
 function splitEqualShares(totalPaise: number, participants: Array<{ shareAmountInPaise: number }>) {
   const base = Math.floor(totalPaise / participants.length);
   const remainder = totalPaise % participants.length;
@@ -537,6 +546,8 @@ type FriendSettlementRecord = {
   acceptedAt?: string;
   rejectedAt?: string;
   cancelledAt?: string;
+  settlementMode?: "clique_net" | "bilateral";
+  settlementGroupUserIds?: string[];
 };
 
 async function queryFirestoreCollectionInTransaction(
@@ -618,7 +629,7 @@ async function getNetworkNetBalancesInTransaction(
   ]);
   const balances: Record<string, number> = {};
   const adjust = (userId: string, delta: number) => {
-    balances[userId] = (balances[userId] ?? 0) + delta;
+    balances[userId] = addSafePaise(balances[userId] ?? 0, delta, "Network balance");
   };
 
   for (const doc of splitDocs) {
@@ -642,8 +653,20 @@ async function getNetworkNetBalancesInTransaction(
     }
   }
 
-  for (const doc of friendSettlementDocs) {
-    const settlement = fsDocData(doc);
+  const uniqueFriendSettlements = deduplicateFriendSettlementRecords(friendSettlementDocs.map((doc) => {
+    const item = fsDocData(doc);
+    return {
+      id: doc.name?.split("/").at(-1) ?? "",
+      fromUserId: String(item.fromUserId ?? ""),
+      toUserId: String(item.toUserId ?? ""),
+      amountInPaise: item.amountInPaise as number,
+      status: String(item.status ?? ""),
+      idempotencyKey: typeof item.idempotencyKey === "string" ? item.idempotencyKey : undefined,
+      settlementMode: typeof item.settlementMode === "string" ? item.settlementMode : undefined,
+      settlementGroupUserIds: Array.isArray(item.settlementGroupUserIds) ? item.settlementGroupUserIds.filter((id): id is string => typeof id === "string") : undefined,
+    };
+  }));
+  for (const settlement of uniqueFriendSettlements) {
     if (settlement.status !== "accepted") continue;
     const from = assertId(settlement.fromUserId, "Friend settlement sender");
     const to = assertId(settlement.toUserId, "Friend settlement recipient");
@@ -661,19 +684,22 @@ async function getNetworkNetBalancesInTransaction(
 
 /** Canonical undirected key for an accepted friendship. */
 function friendshipKey(userA: string, userB: string): string {
-  return [userA, userB].sort().join("\u0000");
+  const [first, second] = userA < userB ? [userA, userB] : [userB, userA];
+  return `${first}\u0000${second}`;
 }
 
 async function getAcceptedFriendshipKeysInTransaction(transactionId: string): Promise<Set<string>> {
   const docs = await queryEntireCollectionInTransaction("friends", transactionId);
-  const keys = new Set<string>();
-  for (const doc of docs) {
+  // `acceptFriendRequest` writes mirrored directional records. Requiring both
+  // records prevents a stale/partial friend-list entry from authorizing payment.
+  return buildMutualFriendshipKeys(docs.map((doc) => {
     const data = fsDocData(doc);
-    const userId = typeof data.userId === "string" ? data.userId : "";
-    const friendId = typeof data.friendId === "string" ? data.friendId : "";
-    if (userId && friendId && userId !== friendId) keys.add(friendshipKey(userId, friendId));
-  }
-  return keys;
+    return {
+      userId: data.userId,
+      friendId: data.friendId,
+      documentId: doc.name?.split("/").at(-1) ?? "",
+    };
+  }));
 }
 
 /**
@@ -683,46 +709,164 @@ async function getAcceptedFriendshipKeysInTransaction(transactionId: string): Pr
  * but they cannot offset a user's friend-only settlement capacity.
  */
 /**
- * Outstanding net amount between one specific friend pair. This is deliberately
- * bilateral: a third friend's credit cannot reduce this pair's debt.
+ * Amount a caller can currently propose to transfer on a direct friendship edge.
+ * Complete mutual cliques use group-net balances; bridge/leaf edges remain bilateral.
  */
-async function getBilateralFriendDebtInTransaction(
+type FriendSettlementValidationResult = {
+  availableAmountInPaise: number;
+  settlementMode: "bilateral" | "clique_net";
+  settlementGroupUserIds?: string[];
+};
+
+/**
+ * Re-reads the ledger in the caller's Firestore transaction. New requests use
+ * group netting only when both participants belong to the same complete friendship
+ * block; old requests without a mode keep their original bilateral semantics.
+ */
+async function getFriendSettlementValidationInTransaction(
   fromUserId: string,
   toUserId: string,
   transactionId: string,
-  excludePendingSettlementId?: string,
-): Promise<number> {
+  options: {
+    excludePendingSettlementId?: string;
+    mode?: "auto" | "bilateral" | "clique_net";
+    expectedGroupUserIds?: string[];
+  } = {},
+): Promise<FriendSettlementValidationResult> {
   const [splitDocs, settlementDocs, friendKeys] = await Promise.all([
     queryEntireCollectionInTransaction("splits", transactionId),
     queryEntireCollectionInTransaction("friendSettlements", transactionId),
     getAcceptedFriendshipKeysInTransaction(transactionId),
   ]);
   if (!friendKeys.has(friendshipKey(fromUserId, toUserId))) {
-    throw new Error("Repayments are allowed only between accepted friends");
+    throw new Error("Repayments are allowed only between mutually accepted friends");
   }
-  let debt = 0;
+
+  const obligations: Array<{
+    fromUserId: string;
+    toUserId: string;
+    amountInPaise: number;
+    acceptedAmountInPaise: number;
+    pendingAmountInPaise: number;
+    splitStatus: string;
+  }> = [];
   for (const doc of splitDocs) {
     const split = fsDocData(doc);
-    if (split.status === "cancelled") continue;
-    const obligations = Array.isArray(split.obligations)
+    const rows = Array.isArray(split.obligations)
       ? split.obligations as Array<Record<string, unknown>> : [];
-    for (const item of obligations) {
-      if (item.fromUserId !== fromUserId || item.toUserId !== toUserId) continue;
-      const total = assertPaise(item.amountInPaise, "Split obligation", true);
-      const accepted = assertPaise(item.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
-      const pending = assertPaise(item.pendingAmountInPaise ?? 0, "Pending split repayment", true);
-      debt += Math.max(0, total - accepted - pending);
+    for (const item of rows) {
+      obligations.push({
+        fromUserId: String(item.fromUserId ?? ""),
+        toUserId: String(item.toUserId ?? ""),
+        amountInPaise: assertPaise(item.amountInPaise, "Split obligation", true),
+        acceptedAmountInPaise: assertPaise(item.acceptedAmountInPaise ?? 0, "Accepted split repayment", true),
+        pendingAmountInPaise: assertPaise(item.pendingAmountInPaise ?? 0, "Pending split repayment", true),
+        splitStatus: String(split.status ?? ""),
+      });
     }
   }
-  for (const doc of settlementDocs) {
+
+  const settlements = deduplicateFriendSettlementRecords(settlementDocs.map((doc) => {
     const item = fsDocData(doc);
-    if (doc.name?.split("/").at(-1) === excludePendingSettlementId) continue;
-    if (item.fromUserId !== fromUserId || item.toUserId !== toUserId) continue;
-    const amount = assertPaise(item.amountInPaise, "Friend settlement amount", true);
-    if (item.status === "accepted") debt -= amount;
-    else if (item.status === "pending") debt -= amount;
+    return {
+      id: doc.name?.split("/").at(-1) ?? "",
+      fromUserId: String(item.fromUserId ?? ""),
+      toUserId: String(item.toUserId ?? ""),
+      amountInPaise: item.amountInPaise as number,
+      status: String(item.status ?? ""),
+      idempotencyKey: typeof item.idempotencyKey === "string" ? item.idempotencyKey : undefined,
+      settlementMode: typeof item.settlementMode === "string" ? item.settlementMode : undefined,
+      settlementGroupUserIds: Array.isArray(item.settlementGroupUserIds)
+        ? item.settlementGroupUserIds.filter((id): id is string => typeof id === "string")
+        : undefined,
+    };
+  }));
+
+  // Do not reinterpret a previously accepted group-net payment as bilateral if
+  // the friendship block has changed since it was approved.
+  for (const settlement of settlements) {
+    if (settlement.settlementMode !== "clique_net" || settlement.status !== "accepted") continue;
+    const snapshot = [...new Set(settlement.settlementGroupUserIds ?? [])].sort();
+    const currentGroup = getCompleteFriendshipCliqueForPair(friendKeys, settlement.fromUserId, settlement.toUserId);
+    if (!currentGroup || snapshot.length !== currentGroup.length || snapshot.some((id, index) => id !== currentGroup[index])) {
+      throw new Error("A friendship group changed after a group-net settlement. Suggestions are paused to protect settlement history; review the group settlement before continuing.");
+    }
   }
-  return Math.max(0, debt);
+
+  const requestedMode = options.mode ?? "auto";
+  const clique = getCompleteFriendshipCliqueForPair(friendKeys, fromUserId, toUserId);
+  const useCliqueNetting = requestedMode === "clique_net" || (requestedMode === "auto" && clique !== null);
+  if (useCliqueNetting) {
+    if (!clique) {
+      throw new Error("This friendship pair is no longer part of an eligible complete friendship group.");
+    }
+    if (options.expectedGroupUserIds) {
+      const expected = [...new Set(options.expectedGroupUserIds)].sort();
+      if (expected.length !== clique.length || expected.some((id, index) => id !== clique[index])) {
+        throw new Error("The friendship group changed after this suggestion. Refresh suggestions and create a new request.");
+      }
+    }
+    const capacity = getCliqueSettlementCapacity(
+      obligations,
+      settlements,
+      friendKeys,
+      fromUserId,
+      toUserId,
+      { excludePendingSettlementId: options.excludePendingSettlementId },
+    );
+    if (!capacity) throw new Error("The friendship pair is not eligible for group netting.");
+    return {
+      availableAmountInPaise: capacity.amountInPaise,
+      settlementMode: "clique_net",
+      settlementGroupUserIds: capacity.groupUserIds,
+    };
+  }
+
+  // Legacy bilateral settlement: only the exact two-person net obligation grants
+  // capacity. A transfer involving another pair cannot be redirected here.
+  let signed = 0; // positive means fromUserId owes toUserId.
+  let pendingFromTo = 0;
+  let pendingToFrom = 0;
+  const addSigned = (delta: number) => {
+    signed = addSafePaise(signed, delta, "Bilateral settlement balance");
+  };
+  for (const obligation of obligations) {
+    const total = obligation.amountInPaise;
+    const accepted = obligation.acceptedAmountInPaise;
+    const pending = obligation.pendingAmountInPaise;
+    if (accepted > total || pending > total - accepted) {
+      throw new Error("Accepted and pending repayments exceed a split obligation");
+    }
+    if (obligation.splitStatus === "cancelled") {
+      if (accepted > 0 || pending > 0) throw new Error("Cancelled split retains accepted or pending repayment amounts");
+      continue;
+    }
+    if (obligation.splitStatus === "settled" && (accepted !== total || pending !== 0)) {
+      throw new Error("Settled split status conflicts with outstanding obligation amounts");
+    }
+    const outstanding = total - accepted;
+    if (obligation.fromUserId === fromUserId && obligation.toUserId === toUserId) {
+      addSigned(outstanding);
+      pendingFromTo = addSafePaise(pendingFromTo, pending, "Pending bilateral repayment");
+    } else if (obligation.fromUserId === toUserId && obligation.toUserId === fromUserId) {
+      addSigned(-outstanding);
+      pendingToFrom = addSafePaise(pendingToFrom, pending, "Pending bilateral repayment");
+    }
+  }
+  for (const settlement of settlements) {
+    if (settlement.id === options.excludePendingSettlementId) continue;
+    if (settlement.fromUserId === fromUserId && settlement.toUserId === toUserId) {
+      if (settlement.status === "accepted") addSigned(-settlement.amountInPaise);
+      else pendingFromTo = addSafePaise(pendingFromTo, settlement.amountInPaise, "Pending bilateral settlement");
+    } else if (settlement.fromUserId === toUserId && settlement.toUserId === fromUserId) {
+      if (settlement.status === "accepted") addSigned(settlement.amountInPaise);
+      else pendingToFrom = addSafePaise(pendingToFrom, settlement.amountInPaise, "Pending bilateral settlement");
+    }
+  }
+  const availableAmountInPaise = signed > 0 && pendingToFrom === 0
+    ? Math.max(0, signed - pendingFromTo)
+    : 0;
+  return { availableAmountInPaise, settlementMode: "bilateral" };
 }
 
 async function getFriendOnlyNetBalancesInTransaction(
@@ -735,7 +879,7 @@ async function getFriendOnlyNetBalancesInTransaction(
   ]);
   const balances: Record<string, number> = {};
   const adjust = (userId: string, delta: number) => {
-    balances[userId] = (balances[userId] ?? 0) + delta;
+    balances[userId] = addSafePaise(balances[userId] ?? 0, delta, "Friend-only balance");
   };
 
   for (const doc of splitDocs) {
@@ -750,7 +894,13 @@ async function getFriendOnlyNetBalancesInTransaction(
       if (!from || !to || from === to) throw new Error("A split contains an invalid obligation");
       const total = assertPaise(obligation.amountInPaise, "Split obligation", true);
       const accepted = assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
-      if (accepted > total) throw new Error("Accepted split repayments exceed an obligation");
+      const pending = assertPaise(obligation.pendingAmountInPaise ?? 0, "Pending split repayment", true);
+      if (accepted > total || pending > total - accepted) {
+        throw new Error("Accepted and pending split repayments exceed an obligation");
+      }
+      if (split.status === "settled" && (accepted !== total || pending !== 0)) {
+        throw new Error("Settled split status conflicts with outstanding obligation amounts");
+      }
       if (!friendKeys.has(friendshipKey(from, to))) continue;
       const outstanding = total - accepted;
       if (outstanding > 0) {
@@ -760,14 +910,29 @@ async function getFriendOnlyNetBalancesInTransaction(
     }
   }
 
-  for (const doc of friendSettlementDocs) {
-    const settlement = fsDocData(doc);
+  const uniqueFriendSettlements = deduplicateFriendSettlementRecords(friendSettlementDocs.map((doc) => {
+    const item = fsDocData(doc);
+    return {
+      id: doc.name?.split("/").at(-1) ?? "",
+      fromUserId: String(item.fromUserId ?? ""),
+      toUserId: String(item.toUserId ?? ""),
+      amountInPaise: item.amountInPaise as number,
+      status: String(item.status ?? ""),
+      idempotencyKey: typeof item.idempotencyKey === "string" ? item.idempotencyKey : undefined,
+      settlementMode: typeof item.settlementMode === "string" ? item.settlementMode : undefined,
+      settlementGroupUserIds: Array.isArray(item.settlementGroupUserIds) ? item.settlementGroupUserIds.filter((id): id is string => typeof id === "string") : undefined,
+    };
+  }));
+  for (const settlement of uniqueFriendSettlements) {
     if (settlement.status !== "accepted") continue;
     const from = assertId(settlement.fromUserId, "Friend settlement sender");
     const to = assertId(settlement.toUserId, "Friend settlement recipient");
     if (from === to) throw new Error("A friend settlement cannot involve the same user twice");
-    // Keep history for former friends, but exclude it from current friend netting.
-    if (!friendKeys.has(friendshipKey(from, to))) continue;
+    // Legacy bilateral payments no longer create current friend-only capacity
+    // after a friendship is revoked. Accepted clique-net transfers are historic
+    // group-level adjustments and must remain in the balance ledger even if the
+    // graph later changes; the suggestion endpoint will fail closed for stale groups.
+    if (!friendKeys.has(friendshipKey(from, to)) && settlement.settlementMode !== "clique_net") continue;
     const amount = assertPaise(settlement.amountInPaise, "Accepted friend settlement");
     adjust(from, amount);
     adjust(to, -amount);
@@ -779,75 +944,73 @@ async function getFriendOnlyNetBalancesInTransaction(
 }
 
 /**
- * Run a max-flow matching between net debtors and creditors, allowing an edge
- * only where an accepted friendship exists. This avoids arbitrary A-to-D
- * suggestions just because A and D appear in the same split network.
- */
-/**
- * Produce repayment suggestions by netting obligations only bilaterally.
- *
- * Do not first collapse every person's obligations into one global balance:
- * that lets a credit from friend A reduce a debt to friend B, even when A and
- * B are not friends. Pairwise netting preserves each friendship's own ledger.
+ * Produce caller-scoped settlement suggestions. Complete mutual friendship cliques
+ * are netted as groups because every transfer in that group is a direct friend edge.
+ * Bridge/leaf edges retain their exact bilateral semantics, and non-friend debts
+ * remain unresolved rather than being routed through a third party.
  */
 function simplifyFriendPairObligations(
   splitDocs: FsDoc[],
   friendSettlementDocs: FsDoc[],
   friendKeys: Set<string>,
-): Array<{ fromUserId: string; toUserId: string; amountInPaise: number }> {
-  const pairBalances = new Map<string, { first: string; second: string; signed: number }>();
-  const pairFor = (a: string, b: string) => {
-    const [first, second] = [a, b].sort((x, y) => x.localeCompare(y));
-    const key = `${first}\u0000${second}`;
-    let pair = pairBalances.get(key);
-    if (!pair) {
-      pair = { first, second, signed: 0 };
-      pairBalances.set(key, pair);
-    }
-    return pair;
-  };
-
+  focusUserId: string,
+): {
+  suggestions: Array<{ fromUserId: string; toUserId: string; amountInPaise: number }>;
+  unresolvedObligations: Array<{
+    fromUserId: string;
+    toUserId: string;
+    amountInPaise: number;
+    reason: "not_currently_mutual_friends";
+  }>;
+} {
+  const obligations: Array<{
+    fromUserId: string;
+    toUserId: string;
+    amountInPaise: number;
+    acceptedAmountInPaise: number;
+    pendingAmountInPaise: number;
+    splitStatus: string;
+  }> = [];
   for (const doc of splitDocs) {
     const split = fsDocData(doc);
     if (split.status === "cancelled") continue;
-    const obligations = Array.isArray(split.obligations)
-      ? split.obligations as Array<Record<string, unknown>>
-      : [];
-    for (const obligation of obligations) {
-      const from = typeof obligation.fromUserId === "string" ? obligation.fromUserId : "";
-      const to = typeof obligation.toUserId === "string" ? obligation.toUserId : "";
-      if (!from || !to || from === to || !friendKeys.has(friendshipKey(from, to))) continue;
-      const amount = assertPaise(obligation.amountInPaise, "Split obligation", true)
-        - assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true);
-      if (amount <= 0) continue;
-      const pair = pairFor(from, to);
-      pair.signed += from === pair.first ? amount : -amount;
+    const rows = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>> : [];
+    for (const obligation of rows) {
+      obligations.push({
+        fromUserId: typeof obligation.fromUserId === "string" ? obligation.fromUserId : "",
+        toUserId: typeof obligation.toUserId === "string" ? obligation.toUserId : "",
+        amountInPaise: assertPaise(obligation.amountInPaise, "Split obligation", true),
+        acceptedAmountInPaise: assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true),
+        pendingAmountInPaise: assertPaise(obligation.pendingAmountInPaise ?? 0, "Pending split repayment", true),
+        splitStatus: String(split.status ?? ""),
+      });
     }
   }
-
-  // Accepted friend settlements reduce only the debt between those two friends.
-  for (const doc of friendSettlementDocs) {
-    const settlement = fsDocData(doc);
-    if (settlement.status !== "accepted") continue;
-    const from = typeof settlement.fromUserId === "string" ? settlement.fromUserId : "";
-    const to = typeof settlement.toUserId === "string" ? settlement.toUserId : "";
-    if (!from || !to || from === to || !friendKeys.has(friendshipKey(from, to))) continue;
-    const amount = assertPaise(settlement.amountInPaise, "Accepted friend settlement", true);
-    const pair = pairFor(from, to);
-    pair.signed += from === pair.first ? -amount : amount;
-  }
-
-  const suggestions: Array<{ fromUserId: string; toUserId: string; amountInPaise: number }> = [];
-  for (const pair of pairBalances.values()) {
-    if (pair.signed > 0) {
-      suggestions.push({ fromUserId: pair.first, toUserId: pair.second, amountInPaise: pair.signed });
-    } else if (pair.signed < 0) {
-      suggestions.push({ fromUserId: pair.second, toUserId: pair.first, amountInPaise: -pair.signed });
-    }
-  }
-  return suggestions.sort((a, b) => a.fromUserId.localeCompare(b.fromUserId) || a.toUserId.localeCompare(b.toUserId));
+  const settlements = friendSettlementDocs.map((doc) => {
+    const item = fsDocData(doc);
+    return {
+      id: doc.name?.split("/").at(-1) ?? "",
+      fromUserId: typeof item.fromUserId === "string" ? item.fromUserId : "",
+      toUserId: typeof item.toUserId === "string" ? item.toUserId : "",
+      amountInPaise: item.amountInPaise,
+      status: typeof item.status === "string" ? item.status : "",
+      idempotencyKey: typeof item.idempotencyKey === "string" ? item.idempotencyKey : undefined,
+      settlementMode: typeof item.settlementMode === "string" ? item.settlementMode : undefined,
+      settlementGroupUserIds: Array.isArray(item.settlementGroupUserIds) ? item.settlementGroupUserIds.filter((id): id is string => typeof id === "string") : undefined,
+    };
+  });
+  const plan = calculateFriendshipAwarePlan(
+    obligations,
+    settlements as Array<{
+      id: string; fromUserId: string; toUserId: string; amountInPaise: number;
+      status: string; idempotencyKey?: string;
+    }>,
+    friendKeys,
+    { focusUserId },
+  );
+  return plan;
 }
-
 
 /**
  * Return only the connected shared-expense network containing uid. A split
@@ -904,27 +1067,33 @@ async function getNetworkNetBalancesForUser(
 ): Promise<{
   balances: Record<string, number>;
   suggestions: Array<{ fromUserId: string; toUserId: string; amountInPaise: number }>;
+  unresolvedObligations: Array<{
+    fromUserId: string; toUserId: string; amountInPaise: number;
+    reason: "not_currently_mutual_friends";
+  }>;
+  algorithmVersion: 3;
 }> {
   const transactionId = await beginFirestoreTransaction();
   try {
     // A single Firestore transaction keeps the component and balance reads on
     // the same snapshot. It is read-only and is always rolled back.
     await getFirestoreDocumentInTransaction(SETTLEMENT_LEDGER_LOCK_PATH, transactionId);
-    const [friendLedger, networkUserIds] = await Promise.all([
-      getFriendOnlyNetBalancesInTransaction(transactionId),
-      getConnectedNetworkUserIdsInTransaction(uid, transactionId),
-    ]);
-    const balances: Record<string, number> = {};
-    for (const userId of networkUserIds) balances[userId] = friendLedger.balances[userId] ?? 0;
-    const total = Object.values(balances).reduce((sum, amount) => sum + amount, 0);
-    if (total !== 0) throw new Error(`The connected friend-only network does not reconcile (${total} paise)`);
+    const friendLedger = await getFriendOnlyNetBalancesInTransaction(transactionId);
+    const userBalance = friendLedger.balances[uid] ?? 0;
+    // Only the caller's net balance and pairwise suggestions involving that caller
+    // leave the trusted backend. Other participants' financial positions stay private.
     const [splitDocs, friendSettlementDocs] = await Promise.all([
       queryEntireCollectionInTransaction("splits", transactionId),
       queryEntireCollectionInTransaction("friendSettlements", transactionId),
     ]);
-    const suggestions = simplifyFriendPairObligations(splitDocs, friendSettlementDocs, friendLedger.friendKeys);
+    const plan = simplifyFriendPairObligations(splitDocs, friendSettlementDocs, friendLedger.friendKeys, uid);
     await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) });
-    return { balances, suggestions };
+    return {
+      balances: { [uid]: userBalance },
+      suggestions: plan.suggestions,
+      unresolvedObligations: plan.unresolvedObligations,
+      algorithmVersion: 3,
+    };
   } catch (error) {
     try { await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) }); } catch {}
     throw error;
@@ -957,7 +1126,7 @@ async function getNetworkReservationsInTransaction(
   const reserved: Record<string, number> = {};
   const reserve = (userId: string, amount: number) => {
     if (!userId || amount <= 0) return;
-    reserved[userId] = (reserved[userId] ?? 0) + amount;
+    reserved[userId] = addSafePaise(reserved[userId] ?? 0, amount, "Pending reservation total");
   };
 
   for (const doc of splitDocs) {
@@ -989,12 +1158,21 @@ async function getNetworkReservationsInTransaction(
     }
   }
 
-  for (const doc of friendSettlementDocs) {
-    if (doc.name?.split("/").at(-1) === exclusions.friendSettlementId) continue;
-    const settlement = fsDocData(doc);
-    if (settlement.status !== "pending") continue;
-    const fromUserId = String(settlement.fromUserId ?? "");
-    const toUserId = String(settlement.toUserId ?? "");
+  const uniqueFriendSettlements = deduplicateFriendSettlementRecords(friendSettlementDocs.map((doc) => {
+    const item = fsDocData(doc);
+    return {
+      id: doc.name?.split("/").at(-1) ?? "",
+      fromUserId: String(item.fromUserId ?? ""),
+      toUserId: String(item.toUserId ?? ""),
+      amountInPaise: item.amountInPaise as number,
+      status: String(item.status ?? ""),
+      idempotencyKey: typeof item.idempotencyKey === "string" ? item.idempotencyKey : undefined,
+    };
+  }));
+  for (const settlement of uniqueFriendSettlements) {
+    if (settlement.id === exclusions.friendSettlementId || settlement.status !== "pending") continue;
+    const fromUserId = settlement.fromUserId;
+    const toUserId = settlement.toUserId;
     if (!fromUserId || !toUserId || !friendKeys.has(friendshipKey(fromUserId, toUserId))) continue;
     const amount = assertPaise(settlement.amountInPaise, "Pending friend settlement", true);
     reserve(fromUserId, amount);
@@ -1029,7 +1207,15 @@ async function assertUsersAreFriendsInTransaction(
     getFirestoreDocumentInTransaction(`friends/${userA}_${userB}`, transactionId),
     getFirestoreDocumentInTransaction(`friends/${userB}_${userA}`, transactionId),
   ]);
-  if (!forward && !reverse) throw new Error("Repayments are allowed only between accepted friends");
+  if (!forward || !reverse) throw new Error("Repayments are allowed only between mutually accepted friends");
+  const forwardData = fsDocData(forward);
+  const reverseData = fsDocData(reverse);
+  if (
+    forwardData.userId !== userA || forwardData.friendId !== userB
+    || reverseData.userId !== userB || reverseData.friendId !== userA
+  ) {
+    throw new Error("Friendship records are inconsistent; the repayment is not authorized");
+  }
 }
 
 async function requestFriendSettlement(
@@ -1074,12 +1260,14 @@ async function requestFriendSettlement(
     if (!networkUserIds.has(toUserId)) {
       throw new Error("The recipient is not part of your connected shared-expense network");
     }
-    const available = await getBilateralFriendDebtInTransaction(uid, toUserId, transactionId);
-    if (available <= 0) {
-      throw new Error("The friend-to-friend ledger does not show that you owe this friend");
+    const validation = await getFriendSettlementValidationInTransaction(uid, toUserId, transactionId, { mode: "auto" });
+    if (validation.availableAmountInPaise <= 0) {
+      throw new Error(validation.settlementMode === "clique_net"
+        ? "The group net balances do not show that you currently owe this friend. Refresh the suggestions."
+        : "The friend-to-friend ledger does not show that you owe this friend");
     }
-    if (amountInPaise > available) {
-      throw new Error(`Amount exceeds the available net settlement balance of ₹${(available / 100).toFixed(2)}`);
+    if (amountInPaise > validation.availableAmountInPaise) {
+      throw new Error(`Amount exceeds the currently available net settlement balance of ₹${(validation.availableAmountInPaise / 100).toFixed(2)}`);
     }
 
     const record: FriendSettlementRecord = {
@@ -1093,6 +1281,10 @@ async function requestFriendSettlement(
       fromAccountId,
       ...(typeof data.note === "string" && data.note.trim() ? { note: data.note.trim().slice(0, 500) } : {}),
       createdAt: new Date().toISOString(),
+      ...(validation.settlementMode === "clique_net" ? {
+        settlementMode: "clique_net" as const,
+        settlementGroupUserIds: validation.settlementGroupUserIds,
+      } : { settlementMode: "bilateral" as const }),
     };
     const writes: unknown[] = [
       {
@@ -1154,9 +1346,22 @@ async function acceptFriendSettlement(
     if (!recipientAccountDoc) throw new Error("The selected receiving account was not found");
 
     // Exclude this request from pending reservations when validating acceptance.
-    const available = await getBilateralFriendDebtInTransaction(fromUserId, uid, transactionId, settlementId);
-    if (amountInPaise > available) {
-      throw new Error("The bilateral friend balance changed. This request can no longer be accepted for that amount.");
+    // The settlement mode was chosen on the server at request time and cannot be
+    // downgraded or changed by the client.
+    const settlementMode = settlement.settlementMode === "clique_net" ? "clique_net" : "bilateral";
+    const validation = await getFriendSettlementValidationInTransaction(fromUserId, uid, transactionId, {
+      excludePendingSettlementId: settlementId,
+      mode: settlementMode,
+      ...(settlementMode === "clique_net" ? {
+        expectedGroupUserIds: Array.isArray(settlement.settlementGroupUserIds)
+          ? settlement.settlementGroupUserIds.filter((id): id is string => typeof id === "string")
+          : [],
+      } : {}),
+    });
+    if (amountInPaise > validation.availableAmountInPaise) {
+      throw new Error(settlementMode === "clique_net"
+        ? "The group net balance changed. This request can no longer be accepted for that amount."
+        : "The bilateral friend balance changed. This request can no longer be accepted for that amount.");
     }
 
     const payerAccount = fsDocData(payerAccountDoc);

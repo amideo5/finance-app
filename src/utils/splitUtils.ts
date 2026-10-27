@@ -10,6 +10,7 @@ export interface SettlementSuggestion {
   fromUserId: string;
   toUserId: string;
   amountInPaise: number;
+  settlementMode?: 'clique_net';
 }
 
 export function allocateEqualShares(totalAmountInPaise: number, userIds: string[]): SplitParticipant[] {
@@ -59,8 +60,7 @@ export function getOutstandingObligations(
       remaining.set(key, obligation.amountInPaise);
     }
   }
-  for (const settlement of settlements) {
-    if (settlement.status !== 'accepted') continue;
+  for (const settlement of uniqueAcceptedSplitSettlements(settlements)) {
     const key = obligationKey(settlement.splitId, settlement.fromUserId, settlement.toUserId);
     const outstanding = remaining.get(key);
     if (outstanding === undefined || settlement.amountInPaise <= 0 || settlement.amountInPaise > outstanding) {
@@ -97,8 +97,7 @@ export function calculateNetBalances(
       }
     }
   }
-  for (const settlement of settlements) {
-    if (settlement.status !== 'accepted') continue;
+  for (const settlement of uniqueAcceptedSplitSettlements(settlements)) {
     if (!Number.isSafeInteger(settlement.amountInPaise) || settlement.amountInPaise <= 0) {
       throw new Error('Accepted settlements must have a positive whole-paise amount.');
     }
@@ -217,3 +216,133 @@ function validatePositivePaise(amount: number, label: string): void {
 function obligationKey(splitId: string, fromUserId: string, toUserId: string): string {
   return `${splitId}\u0000${fromUserId}\u0000${toUserId}`;
 }
+
+/**
+ * Deduplicate legacy duplicate accepted settlement rows by idempotency key.
+ * If an idempotency key was reused with different financial data, fail closed.
+ */
+function uniqueAcceptedSplitSettlements(settlements: SplitSettlement[]): SplitSettlement[] {
+  const unique = new Map<string, SplitSettlement>();
+  for (const settlement of settlements) {
+    if (settlement.status !== 'accepted') continue;
+    const key = settlement.idempotencyKey?.trim() || settlement.id;
+    const previous = unique.get(key);
+    if (!previous) {
+      unique.set(key, settlement);
+      continue;
+    }
+    if (
+      previous.splitId !== settlement.splitId
+      || previous.fromUserId !== settlement.fromUserId
+      || previous.toUserId !== settlement.toUserId
+      || previous.amountInPaise !== settlement.amountInPaise
+    ) {
+      throw new Error('Duplicate settlement idempotency keys contain conflicting financial data.');
+    }
+  }
+  return [...unique.values()];
+}
+
+/**
+ * Deterministic maximum-flow matching between net debtors and creditors, with
+ * direct friendship edges only. This utility is useful when aggregate netting is
+ * explicitly allowed by the caller; the live product's current settlement path
+ * intentionally retains bilateral obligations and does not use this to rewrite debt.
+ */
+export function simplifyDebtsWithFriendships(
+  balances: Record<string, number>,
+  friendships: Array<[string, string]>,
+): SettlementSuggestion[] {
+  const entries = Object.entries(balances).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.some(([, amount]) => !Number.isSafeInteger(amount))) {
+    throw new Error('Balances must be whole paise amounts.');
+  }
+  const total = entries.reduce((sum, [, amount]) => sum + amount, 0);
+  if (!Number.isSafeInteger(total) || total !== 0) {
+    throw new Error(`Balances must reconcile to zero (${total} paise).`);
+  }
+
+  const debtors = entries.filter(([, amount]) => amount < 0).map(([userId, amount]) => ({ userId, remaining: -amount }));
+  const creditors = entries.filter(([, amount]) => amount > 0).map(([userId, amount]) => ({ userId, remaining: amount }));
+  if (debtors.length === 0 || creditors.length === 0) return [];
+
+  const normalizedFriendships = new Set<string>();
+  for (const [a, b] of friendships) {
+    if (!a || !b || a === b) continue;
+    normalizedFriendships.add(obligationPairKey(a, b));
+  }
+
+  type Edge = { to: number; reverseIndex: number; capacity: number; initialCapacity: number };
+  const source = 0;
+  const debtorOffset = 1;
+  const creditorOffset = debtorOffset + debtors.length;
+  const sink = creditorOffset + creditors.length;
+  const graph: Edge[][] = Array.from({ length: sink + 1 }, () => []);
+  const addEdge = (from: number, to: number, capacity: number): Edge => {
+    const forward: Edge = { to, reverseIndex: graph[to].length, capacity, initialCapacity: capacity };
+    const reverse: Edge = { to: from, reverseIndex: graph[from].length, capacity: 0, initialCapacity: 0 };
+    graph[from].push(forward);
+    graph[to].push(reverse);
+    return forward;
+  };
+
+  const debtorCreditorEdges: Array<{ debtorIndex: number; creditorIndex: number; edge: Edge }> = [];
+  const totalDebt = debtors.reduce((sum, debtor) => sum + debtor.remaining, 0);
+  debtors.forEach((debtor, debtorIndex) => addEdge(source, debtorOffset + debtorIndex, debtor.remaining));
+  creditors.forEach((creditor, creditorIndex) => addEdge(creditorOffset + creditorIndex, sink, creditor.remaining));
+  debtors.forEach((debtor, debtorIndex) => {
+    creditors.forEach((creditor, creditorIndex) => {
+      if (!normalizedFriendships.has(obligationPairKey(debtor.userId, creditor.userId))) return;
+      debtorCreditorEdges.push({
+        debtorIndex,
+        creditorIndex,
+        edge: addEdge(debtorOffset + debtorIndex, creditorOffset + creditorIndex, totalDebt),
+      });
+    });
+  });
+
+  // Edmonds–Karp gives deterministic maximum flow because node/edge iteration is sorted.
+  while (true) {
+    const parentNode = Array<number>(graph.length).fill(-1);
+    const parentEdge = Array<number>(graph.length).fill(-1);
+    const queue = [source];
+    parentNode[source] = source;
+    for (let head = 0; head < queue.length && parentNode[sink] === -1; head++) {
+      const node = queue[head];
+      for (let edgeIndex = 0; edgeIndex < graph[node].length; edgeIndex++) {
+        const edge = graph[node][edgeIndex];
+        if (edge.capacity <= 0 || parentNode[edge.to] !== -1) continue;
+        parentNode[edge.to] = node;
+        parentEdge[edge.to] = edgeIndex;
+        queue.push(edge.to);
+        if (edge.to === sink) break;
+      }
+    }
+    if (parentNode[sink] === -1) break;
+
+    let augment = Number.MAX_SAFE_INTEGER;
+    for (let node = sink; node !== source; node = parentNode[node]) {
+      augment = Math.min(augment, graph[parentNode[node]][parentEdge[node]].capacity);
+    }
+    if (!Number.isSafeInteger(augment) || augment <= 0) throw new Error('Invalid settlement flow amount.');
+    for (let node = sink; node !== source; node = parentNode[node]) {
+      const edge = graph[parentNode[node]][parentEdge[node]];
+      edge.capacity -= augment;
+      graph[node][edge.reverseIndex].capacity += augment;
+    }
+  }
+
+  return debtorCreditorEdges.map(({ debtorIndex, creditorIndex, edge }) => ({
+    fromUserId: debtors[debtorIndex].userId,
+    toUserId: creditors[creditorIndex].userId,
+    amountInPaise: edge.initialCapacity - edge.capacity,
+  })).filter((item) => item.amountInPaise > 0).sort((a, b) =>
+    a.fromUserId.localeCompare(b.fromUserId) || a.toUserId.localeCompare(b.toUserId),
+  );
+}
+
+function obligationPairKey(userA: string, userB: string): string {
+  const [first, second] = [userA, userB].sort((a, b) => a.localeCompare(b));
+  return `${first}\u0000${second}`;
+}
+

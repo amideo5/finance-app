@@ -22,7 +22,7 @@ export function getReportableTransactions(
   return transactions.filter((transaction) => {
     if (transaction.profileId && transaction.profileId !== profileId) return false;
     // Transfers appear in transaction history but are not income or consumption.
-    // if (transaction.kind === 'repayment') return false;
+    if (transaction.kind === 'repayment') return false;
     if (sourceTransactionsToExclude.has(transaction.id)) return false;
     return true;
   }).map((transaction) => transaction.kind === 'allocation'
