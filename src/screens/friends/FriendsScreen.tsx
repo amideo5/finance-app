@@ -20,7 +20,7 @@ import {
   rejectFriendSettlement,
   requestFriendSettlement,
 } from '@/src/services/firebase/splitService';
-import type { FinanceAccount, FriendSettlement } from '@/types/finance';
+import type { FinanceAccount, FriendSettlement, UnresolvedFriendObligation } from '@/types/finance';
 import { buildMaps, getOutstandingObligations, type SettlementSuggestion } from '@/src/utils/splitUtils';
 import { useRouter } from 'expo-router';
 import { UserPlus, Users } from 'lucide-react-native';
@@ -49,7 +49,11 @@ export default function FriendsScreen() {
   const [splits, setSplits] = useState<any[]>([]);
   const [balances, setBalances] = useState<Record<string, number>>({});
   const [settlements, setSettlements] = useState<SettlementSuggestion[]>([]);
+  const [unresolvedObligations, setUnresolvedObligations] = useState<UnresolvedFriendObligation[]>([]);
+  const [splitsLoading, setSplitsLoading] = useState(false);
+  const [splitLoadError, setSplitLoadError] = useState<string | null>(null);
   const [outstandingTotalPaise, setOutstandingTotalPaise] = useState(0);
+  const [pendingSplitRepaymentCount, setPendingSplitRepaymentCount] = useState(0);
   const [friendSettlements, setFriendSettlements] = useState<FriendSettlement[]>([]);
   const [accounts, setAccounts] = useState<FinanceAccount[]>([]);
   const [repaymentTarget, setRepaymentTarget] = useState<{ userId: string; maxPaise: number } | null>(null);
@@ -62,29 +66,47 @@ export default function FriendsScreen() {
   const loadSplits = useCallback(async () => {
     const userId = currentProfile?.userId;
     if (!userId) return;
+    setSplitsLoading(true);
+    setSplitLoadError(null);
+    setBalances({});
+    setSettlements([]);
+    setUnresolvedObligations([]);
+    setSplits([]);
+    setFriendSettlements([]);
+    setOutstandingTotalPaise(0);
+    setPendingSplitRepaymentCount(0);
     try {
       const userSplits = await getUserSplits(userId);
       const splitSettlementRows = (await Promise.all(
         userSplits.map((split) => getSplitSettlements(split.id)),
       )).flat();
       const friendSettlementRows = await getFriendSettlements(userId);
+      const netLedger = await getFriendNetBalances(userId);
+
       setSplits(userSplits);
       setFriendSettlements(friendSettlementRows);
-
-      // A client can only read splits in which the current user participates.
-      // Ask the trusted backend for friend-only connected-network balances and
-      // directly friend-linked net suggestions across all relevant splits.
-      const netLedger = await getFriendNetBalances(userId);
       setBalances(netLedger.balances);
-      // The server returns max-flow matches using accepted friendship edges only.
-      // Never locally simplify the unfiltered network balances: that can invent
-      // suggestions between people who merely share a split.
       setSettlements(netLedger.suggestions);
+      setUnresolvedObligations(netLedger.unresolvedObligations);
       const outstanding = getOutstandingObligations(userSplits, splitSettlementRows);
       setOutstandingTotalPaise(outstanding.reduce((total, item) => total + item.amountInPaise, 0));
+      setPendingSplitRepaymentCount(splitSettlementRows.filter((item) => item.status === 'pending').length);
     } catch (error) {
       console.error('Failed to load split and settlement balances:', error);
-      Alert.alert('Could not load balances', error instanceof Error ? error.message : 'Please try again.');
+      const message = error instanceof Error ? error.message : 'Please try again.';
+      setSplitLoadError(message);
+      // Do not continue displaying stale suggestions after a network, permission,
+      // or backend-version failure. A new suggestion requires a fresh server read.
+      setBalances({});
+      setSettlements([]);
+      setUnresolvedObligations([]);
+      setSplits([]);
+      setFriendSettlements([]);
+      setOutstandingTotalPaise(0);
+      setPendingSplitRepaymentCount(0);
+      Alert.alert('Could not load balances', message);
+    } finally {
+      setSplitsLoading(false);
     }
   }, [currentProfile]);
 
@@ -94,9 +116,11 @@ export default function FriendsScreen() {
 
   const getName = (id: string) => {
     if (id === currentProfile?.userId) return 'You';
-    // Do not expose raw Firebase user IDs when a profile lookup is still loading
-    // or the friend has no readable profile record.
-    return friendMap[id] || 'Friend';
+    const historicalName = splits
+      .flatMap((split) => Array.isArray(split.participants) ? split.participants : [])
+      .find((participant) => participant?.userId === id)?.displayName;
+    // Never display raw Firebase UIDs as names if profile metadata is unavailable.
+    return friendMap[id] || (typeof historicalName === 'string' && historicalName.trim() ? historicalName.trim() : 'Participant');
   };
 
   const loadFriendsData = useCallback(async () => {
@@ -290,15 +314,22 @@ export default function FriendsScreen() {
   const renderSplits = () => {
     if (!currentProfile) return null;
 
-    const acceptedFriendIds = new Set(friends.map((friend) => String(friend.friendId)));
-    const friendOnlySuggestions = settlements.filter((item) => {
-      if (item.fromUserId === currentProfile.userId) return acceptedFriendIds.has(item.toUserId);
-      if (item.toUserId === currentProfile.userId) return acceptedFriendIds.has(item.fromUserId);
-      return false; // this screen only renders the signed-in user's own suggestions
-    });
+    // The trusted Edge Function performs the authoritative mutual-friendship check.
+    // Keep this client-side filter only for caller scope; do not rely on a cached
+    // friend-list query to decide whether a server-validated suggestion is visible.
+    const friendOnlySuggestions = settlements.filter((item) =>
+      item.fromUserId === currentProfile.userId || item.toUserId === currentProfile.userId,
+    );
     const { oweMap, getMap } = buildMaps(friendOnlySuggestions, currentProfile.userId);
+    const isCliqueNetPair = (fromUserId: string, toUserId: string) => friendOnlySuggestions.some((item) =>
+      item.fromUserId === fromUserId && item.toUserId === toUserId && item.settlementMode === 'clique_net'
+    );
 
-    const hasBalance = Object.values(balances).some((value) => value !== 0);
+    const hasBalance = Object.values(balances).some((value) => value !== 0)
+      || friendOnlySuggestions.length > 0
+      || unresolvedObligations.length > 0
+      || pendingSplitRepaymentCount > 0
+      || friendSettlements.some((item) => item.status === 'pending' && (item.fromUserId === currentProfile.userId || item.toUserId === currentProfile.userId));
 
     const totalYouOwe = Object.values(oweMap).reduce((a, b) => a + b, 0);
     const totalOwed = Object.values(getMap).reduce((a, b) => a + b, 0);
@@ -324,7 +355,26 @@ export default function FriendsScreen() {
           </Text>
         </View>
 
-        <Text style={styles.subText}>Suggestions are limited to people who are currently accepted friends. Debts involving non-friends remain on their split and are excluded here. Propose a partial or full payment; the recipient selects a receiving account and accepts before ledger and account balances change.</Text>
+        <Text style={styles.subText}>Suggestions require a currently accepted direct friendship. Inside a fully mutual friend group, balances are netted across the group to reduce transfers; bridge relationships such as a friend connected only to you remain bilateral. A group-net payment adjusts the group's net balance but does not mark any individual split as paid. Suggestions are not completed until the recipient accepts. Missing or inactive friendship records never authorize a new payment.</Text>
+
+        {splitsLoading ? (
+          <View style={styles.noticeCard}>
+            <Text style={styles.subText}>Checking current balances and friendship permissions…</Text>
+          </View>
+        ) : null}
+        {pendingSplitRepaymentCount > 0 && !splitLoadError ? (
+          <View style={styles.noticeCard}>
+            <Text style={styles.noticeTitle}>Split repayments awaiting confirmation</Text>
+            <Text style={styles.subText}>{pendingSplitRepaymentCount} split repayment request(s) are still pending. They remain outstanding until confirmed and must not be treated as completed payments.</Text>
+          </View>
+        ) : null}
+        {splitLoadError ? (
+          <View style={styles.noticeCard}>
+            <Text style={styles.noticeTitle}>Suggestions unavailable</Text>
+            <Text style={styles.subText}>The app could not verify the latest financial ledger and mutual friendship records. No cached suggestion is shown. Refresh after the split service is available.</Text>
+            <Text style={styles.subText}>{splitLoadError}</Text>
+          </View>
+        ) : null}
 
         {/* 🔴 YOU OWE */}
         {Object.entries(oweMap).length > 0 && (
@@ -334,8 +384,8 @@ export default function FriendsScreen() {
             {Object.entries(oweMap).map(([userId, amount]) => (
               <View key={userId} style={styles.settlementCard}>
                 <View>
-                  <Text style={styles.name}>{getName(userId)}</Text>
-                  <Text style={styles.subText}>You owe</Text>
+                  <Text style={styles.name}>{getName(currentProfile.userId)} → {getName(userId)}</Text>
+                  <Text style={styles.subText}>{isCliqueNetPair(currentProfile.userId, userId) ? 'Group-net suggestion' : 'Bilateral suggestion'} · You owe</Text>
                 </View>
 
                 <View style={{ alignItems: 'flex-end', flexShrink: 0 }}>
@@ -357,8 +407,8 @@ export default function FriendsScreen() {
             {Object.entries(getMap).map(([userId, amount]) => (
               <View key={userId} style={styles.settlementCard}>
                 <View>
-                  <Text style={styles.name}>{getName(userId)}</Text>
-                  <Text style={styles.subText}>You get</Text>
+                  <Text style={styles.name}>{getName(userId)} → {getName(currentProfile.userId)}</Text>
+                  <Text style={styles.subText}>{isCliqueNetPair(userId, currentProfile.userId) ? 'Group-net suggestion' : 'Bilateral suggestion'} · You receive</Text>
                 </View>
 
                 <View style={{ alignItems: 'flex-end' }}>
@@ -369,8 +419,30 @@ export default function FriendsScreen() {
           </>
         )}
 
+        {unresolvedObligations.length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>Outstanding amounts blocked by friendship rules</Text>
+            {unresolvedObligations.map((item) => {
+              const youOwe = item.fromUserId === currentProfile.userId;
+              const counterpartId = youOwe ? item.toUserId : item.fromUserId;
+              return (
+                <View key={`${item.fromUserId}:${item.toUserId}`} style={styles.noticeCard}>
+                  <View style={styles.settlementCard}>
+                    <View style={{ flex: 1, paddingRight: 10 }}>
+                      <Text style={styles.name}>{youOwe ? `You owe ${getName(counterpartId)}` : `${getName(counterpartId)} owes you`}</Text>
+                      <Text style={styles.subText}>Outstanding · not settled</Text>
+                    </View>
+                    <Text style={youOwe ? styles.red : styles.green}>₹{(item.amountInPaise / 100).toFixed(2)}</Text>
+                  </View>
+                  <Text style={styles.subText}>{getName(item.fromUserId)} and {getName(item.toUserId)} do not currently have a verified mutual accepted friendship. A direct payment cannot be suggested, and this amount remains outstanding until a permitted settlement is available.</Text>
+                </View>
+              );
+            })}
+          </>
+        )}
+
         {/* 🎉 ALL SETTLED */}
-        {!hasBalance && (
+        {!splitLoadError && !splitsLoading && !hasBalance && (
           <View style={styles.emptyState}>
             <Text style={styles.emptyText}>All settled 🎉</Text>
           </View>
@@ -752,6 +824,20 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 8,
     textAlign: 'center',
+  },
+  noticeCard: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    backgroundColor: colors.card,
+  },
+  noticeTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 6,
   },
   settlementCard: {
     backgroundColor: colors.card,

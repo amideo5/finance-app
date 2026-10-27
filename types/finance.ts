@@ -65,6 +65,13 @@ export interface SplitSettlement {
   acceptedBy?: string;
 }
 
+export interface UnresolvedFriendObligation {
+  fromUserId: string;
+  toUserId: string;
+  amountInPaise: number;
+  reason: 'not_currently_mutual_friends';
+}
+
 export interface FriendSettlement {
   id: string;
   fromUserId: string;
@@ -85,6 +92,10 @@ export interface FriendSettlement {
   rejectedAt?: string;
   cancelledAt?: string;
   acceptedBy?: string;
+  /** Server-selected authorization model for friend-level settlement requests. */
+  settlementMode?: 'clique_net' | 'bilateral';
+  /** Immutable participant snapshot for clique-net requests. */
+  settlementGroupUserIds?: string[];
 }
 
 export interface FinanceTransaction {
