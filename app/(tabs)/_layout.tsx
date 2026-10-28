@@ -1,27 +1,37 @@
 import { colors } from '@/src/constants/colors';
 import { Tabs } from 'expo-router';
 import { Home, Receipt, Settings, Users, Wallet } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function TabLayout() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textSecondary,
+        tabBarLabelStyle: { fontSize: 9, fontWeight: '700', marginTop: 1 },
+        tabBarItemStyle: { flex: 1, minWidth: 0, paddingHorizontal: 0 },
         tabBarStyle: {
-          backgroundColor: colors.border,
+          backgroundColor: colors.card,
           borderTopColor: colors.border,
-          height: 60,
-          paddingBottom: 8,
-          paddingTop: 8,
+          height: 62 + insets.bottom,
+          paddingBottom: Math.max(insets.bottom, 7),
+          paddingTop: 7,
+          elevation: 10,
+          shadowColor: '#25264A',
+          shadowOffset: { width: 0, height: -3 },
+          shadowOpacity: 0.05,
+          shadowRadius: 10,
         },
       }}
     >
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Dashboard',
+          title: 'Home',
           tabBarIcon: ({ size, color }) => (
             <Home size={size} color={color} />
           ),

@@ -1,6 +1,9 @@
 import { useProfile } from "@/src/context/ProfileContext";
 import { db } from "@/src/firebaseConfig";
 import { useRouter } from "expo-router";
+import { colors } from "@/src/constants/colors";
+import { LinearGradient } from "expo-linear-gradient";
+import { ArrowLeft, ArrowLeftRight, CalendarDays, CheckCircle2, FileText, Wallet } from "lucide-react-native";
 import {
   collection,
   doc,
@@ -21,6 +24,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type Account = {
   id: string;
@@ -31,6 +35,7 @@ type Account = {
 
 export default function SelfTransferScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { currentProfile } = useProfile();
 
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -238,55 +243,102 @@ export default function SelfTransferScreen() {
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.heading}>Transfer between my accounts</Text>
-        <Text style={styles.muted}>
-          Move money between accounts you own. This is not income or spending.
-        </Text>
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, 18) + 20 }]} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <View style={[styles.header, { paddingTop: Math.max(insets.top + 8, 20) }]}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Go back" style={styles.backButton} onPress={() => router.back()}>
+            <ArrowLeft size={20} color={colors.text} />
+          </TouchableOpacity>
+          <View style={styles.headingCopy}>
+            <Text style={styles.eyebrow}>MOVE MONEY BETWEEN YOUR OWN ACCOUNTS</Text>
+            <Text style={styles.heading}>Self transfer</Text>
+          </View>
+        </View>
 
-        {renderAccountPicker("From account", fromId, setFromId)}
-        {renderAccountPicker("To account", toId, setToId)}
+        <LinearGradient colors={["#29265E", "#5146D8", "#6C63F5"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.heroCard}>
+          <View style={styles.heroIcon}><ArrowLeftRight color="#FFFFFF" size={22} /></View>
+          <Text style={styles.heroTitle}>A move, not an expense</Text>
+          <Text style={styles.heroCopy}>Transfer between accounts you own. Your statement can track the movement without treating it as new income or spending.</Text>
+          <View style={styles.heroPill}><CheckCircle2 size={14} color="#C9FFE5" /><Text style={styles.heroPillText}>Balances update together</Text></View>
+        </LinearGradient>
 
-        <View style={styles.section}>
+        <View style={styles.formCard}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionIcon}><Wallet size={18} color={colors.primary} /></View>
+            <View style={styles.sectionHeadingCopy}>
+              <Text style={styles.sectionTitle}>Transfer route</Text>
+              <Text style={styles.sectionSubtitle}>Choose where money leaves and arrives</Text>
+            </View>
+          </View>
+          {renderAccountPicker("From account", fromId, setFromId)}
+          <View style={styles.routeConnector}>
+            <View style={styles.routeLine} />
+            <View style={styles.routeConnectorIcon}><ArrowLeftRight size={16} color={colors.primary} /></View>
+            <View style={styles.routeLine} />
+          </View>
+          {renderAccountPicker("To account", toId, setToId)}
+        </View>
+
+        <View style={styles.formCard}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionIcon}><FileText size={18} color={colors.primary} /></View>
+            <View style={styles.sectionHeadingCopy}>
+              <Text style={styles.sectionTitle}>Transfer details</Text>
+              <Text style={styles.sectionSubtitle}>Amount, date and an optional note</Text>
+            </View>
+          </View>
+
           <Text style={styles.label}>Amount</Text>
-          <TextInput
-            style={styles.input}
-            value={amountText}
-            onChangeText={setAmountText}
-            placeholder="0.00"
-            keyboardType="decimal-pad"
-          />
+          <View style={styles.amountInputWrap}>
+            <Text style={styles.amountCurrency}>₹</Text>
+            <TextInput
+              style={styles.amountInput}
+              value={amountText}
+              onChangeText={setAmountText}
+              placeholder="0.00"
+              placeholderTextColor="#A0A3B6"
+              keyboardType="decimal-pad"
+            />
+          </View>
 
-          <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
-          <TextInput
-            style={styles.input}
-            value={date}
-            onChangeText={setDate}
-            placeholder="2026-10-24"
-          />
+          <Text style={styles.label}>Transfer date</Text>
+          <View style={styles.inputWrap}>
+            <CalendarDays size={17} color={colors.textLight} />
+            <TextInput
+              style={styles.input}
+              value={date}
+              onChangeText={setDate}
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor="#A0A3B6"
+            />
+          </View>
+          <Text style={styles.helperText}>Use YYYY-MM-DD, for example 2026-10-27.</Text>
 
-          <Text style={styles.label}>Note (optional)</Text>
+          <Text style={styles.label}>Note <Text style={styles.optionalLabel}>(optional)</Text></Text>
           <TextInput
-            style={styles.input}
+            style={styles.noteInput}
             value={note}
             onChangeText={setNote}
             placeholder="e.g. Move savings to current account"
+            placeholderTextColor="#A0A3B6"
+            multiline
+            textAlignVertical="top"
           />
+        </View>
+
+        <View style={styles.infoCard}>
+          <CheckCircle2 size={18} color="#16875B" />
+          <Text style={styles.infoText}>The transfer will be recorded on both accounts so the money leaving one account matches the money arriving in the other.</Text>
         </View>
 
         <TouchableOpacity
           style={[styles.saveButton, saving && styles.disabledButton]}
           onPress={saveTransfer}
           disabled={saving}
+          activeOpacity={0.86}
         >
-          {saving ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.saveButtonText}>Save transfer</Text>
-          )}
+          {saving ? <ActivityIndicator color="#FFFFFF" /> : <><ArrowLeftRight size={18} color="#FFFFFF" /><Text style={styles.saveButtonText}>Confirm transfer</Text></>}
         </TouchableOpacity>
-
-        <TouchableOpacity style={styles.cancelButton} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.cancelButton} onPress={() => router.back()} disabled={saving}>
           <Text style={styles.cancelText}>Cancel</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -295,44 +347,50 @@ export default function SelfTransferScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#fff" },
-  content: { padding: 20, paddingBottom: 40 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  heading: { fontSize: 22, fontWeight: "700", marginBottom: 8, color: "#111" },
-  muted: { color: "#666", marginBottom: 16 },
-  section: { marginTop: 18 },
-  label: { fontSize: 14, fontWeight: "600", color: "#333", marginBottom: 8 },
-  accountOption: {
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 8,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  selectedOption: { borderColor: "#2563eb", backgroundColor: "#eff6ff" },
-  accountName: { fontWeight: "600", color: "#111" },
-  accountBalance: { color: "#666", marginTop: 4, fontSize: 12 },
-  radio: { fontSize: 18, color: "#2563eb" },
-  input: {
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 14,
-    color: "#111",
-  },
-  saveButton: {
-    backgroundColor: "#2563eb",
-    padding: 15,
-    borderRadius: 10,
-    alignItems: "center",
-    marginTop: 20,
-  },
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { paddingHorizontal: 18, paddingTop: 0, paddingBottom: 38 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background, gap: 10 },
+  muted: { color: colors.textSecondary, fontSize: 12 },
+  header: { flexDirection: 'row', alignItems: 'center', gap: 13, paddingTop: 20, paddingBottom: 21 },
+  backButton: { width: 42, height: 42, borderRadius: 15, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
+  headingCopy: { flex: 1 },
+  eyebrow: { color: colors.primary, fontSize: 8, letterSpacing: 1.1, fontWeight: '800', marginBottom: 5 },
+  heading: { fontSize: 26, lineHeight: 31, fontWeight: '800', color: colors.text, letterSpacing: -0.7 },
+  heroCard: { padding: 20, borderRadius: 24, marginBottom: 18, overflow: 'hidden', shadowColor: '#3932A3', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.18, shadowRadius: 16, elevation: 5 },
+  heroIcon: { width: 42, height: 42, borderRadius: 15, backgroundColor: 'rgba(255,255,255,0.16)', alignItems: 'center', justifyContent: 'center', marginBottom: 15 },
+  heroTitle: { color: '#FFFFFF', fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
+  heroCopy: { color: '#E1DFFF', fontSize: 11, lineHeight: 18, marginTop: 8 },
+  heroPill: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(255,255,255,0.13)', paddingVertical: 8, paddingHorizontal: 11, borderRadius: 13, marginTop: 15 },
+  heroPillText: { color: '#FFFFFF', fontSize: 10, fontWeight: '700' },
+  formCard: { backgroundColor: colors.card, borderRadius: 22, padding: 16, borderWidth: 1, borderColor: colors.border, marginBottom: 15 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 18 },
+  sectionIcon: { width: 40, height: 40, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#ECEBFF' },
+  sectionHeadingCopy: { flex: 1, gap: 3 },
+  sectionTitle: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  sectionSubtitle: { color: colors.textSecondary, fontSize: 10 },
+  section: { marginTop: 3 },
+  label: { fontSize: 12, fontWeight: '800', color: colors.text, marginBottom: 8, marginTop: 7 },
+  accountOption: { borderWidth: 1, borderColor: colors.border, borderRadius: 15, padding: 13, marginBottom: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: colors.card },
+  selectedOption: { borderColor: colors.primary, backgroundColor: '#F2F1FF' },
+  accountName: { fontWeight: '800', color: colors.text, fontSize: 12 },
+  accountBalance: { color: colors.textSecondary, marginTop: 5, fontSize: 10 },
+  radio: { fontSize: 18, color: colors.primary, fontWeight: '800' },
+  routeConnector: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 15, marginTop: -1, marginBottom: 6 },
+  routeLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  routeConnectorIcon: { width: 30, height: 30, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#ECEBFF' },
+  amountInputWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, height: 58, paddingHorizontal: 15, borderRadius: 15, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
+  amountCurrency: { color: colors.primary, fontSize: 22, fontWeight: '800' },
+  amountInput: { flex: 1, fontSize: 22, fontWeight: '800', color: colors.text, paddingVertical: 0 },
+  inputWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 13, minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
+  input: { flex: 1, paddingVertical: 12, color: colors.text, fontSize: 12 },
+  helperText: { color: colors.textLight, fontSize: 10, marginTop: 6, marginBottom: 5 },
+  optionalLabel: { fontSize: 11, color: colors.textLight, fontWeight: '500' },
+  noteInput: { minHeight: 88, borderWidth: 1, borderColor: colors.border, borderRadius: 15, padding: 13, color: colors.text, backgroundColor: colors.background, fontSize: 12 },
+  infoCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, backgroundColor: '#EAF8F1', padding: 13, borderRadius: 15, marginBottom: 16 },
+  infoText: { flex: 1, color: '#256B50', fontSize: 10, lineHeight: 16 },
+  saveButton: { backgroundColor: colors.primary, minHeight: 52, paddingHorizontal: 16, borderRadius: 16, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 9, marginTop: 2, shadowColor: colors.primary, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.2, shadowRadius: 10, elevation: 3 },
   disabledButton: { opacity: 0.6 },
-  saveButtonText: { color: "#fff", fontWeight: "700" },
-  cancelButton: { padding: 14, alignItems: "center" },
-  cancelText: { color: "#555", fontWeight: "600" },
+  saveButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  cancelButton: { padding: 15, alignItems: 'center' },
+  cancelText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
 });

@@ -21,7 +21,21 @@ export const addTransaction = async (profileId, data) => {
     if (accountRef && delta !== 0) {
       const accountSnapshot = await transaction.get(accountRef);
       if (!accountSnapshot.exists()) throw new Error("Selected account no longer exists.");
-      const current = Number(accountSnapshot.data().balance || 0);
+      const accountData = accountSnapshot.data();
+      const current = Number(accountData.balance ?? 0);
+      if (!Number.isFinite(current)) throw new Error("The selected account has an invalid balance. Update the account before recording this transaction.");
+
+      // Every ordinary expense must be covered by the selected account. This is
+      // checked inside the same Firestore transaction as the debit, so a stale
+      // screen balance or simultaneous spend cannot bypass the guard.
+      if (delta < 0 && current + delta < -0.000001) {
+        const accountName = typeof accountData.name === "string" && accountData.name.trim()
+          ? accountData.name.trim()
+          : "selected account";
+        throw new Error(
+          `Insufficient balance in ${accountName}. Available ₹${current.toFixed(2)}, required ₹${Math.abs(delta).toFixed(2)}. Choose another account or add funds first.`,
+        );
+      }
       transaction.update(accountRef, { balance: current + delta, updatedAt: serverTimestamp() });
     }
     transaction.set(txRef, {

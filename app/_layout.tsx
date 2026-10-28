@@ -27,6 +27,7 @@ function RootNavigation() {
         <Stack.Screen name="auth/login" />
         <Stack.Screen name="auth/signup" />
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="statement" options={{ presentation: 'card' }} />
         <Stack.Screen name="transactions/add-expense" options={{ presentation: 'modal' }} />
         <Stack.Screen name="+not-found" />
       </Stack>

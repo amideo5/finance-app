@@ -1,19 +1,19 @@
 export const colors = {
-  primary: '#3B82F6',
-  primaryDark: '#2563EB',
-  secondary: '#10B981',
+  primary: '#6157E8',
+  primaryDark: '#4940C9',
+  secondary: '#17A673',
   danger: '#EF4444',
   warning: '#F59E0B',
   success: '#10B981',
   info: '#3B82F6',
 
-  background: '#F9FAFB',
+  background: '#F5F6FC',
   card: '#FFFFFF',
-  border: '#E5E7EB',
+  border: '#E6E8F2',
 
-  text: '#111827',
-  textSecondary: '#6B7280',
-  textLight: '#9CA3AF',
+  text: '#171A35',
+  textSecondary: '#747891',
+  textLight: '#A0A3B6',
 
   income: '#10B981',
   expense: '#EF4444',
@@ -31,9 +31,9 @@ export const colors = {
 };
 
 export const darkColors = {
-  primary: '#3B82F6',
-  primaryDark: '#2563EB',
-  secondary: '#10B981',
+  primary: '#8C85FF',
+  primaryDark: '#6157E8',
+  secondary: '#17A673',
   danger: '#EF4444',
   warning: '#F59E0B',
   success: '#10B981',

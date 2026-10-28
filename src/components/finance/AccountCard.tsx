@@ -21,6 +21,14 @@ export default function AccountCard({
   accountNumber,
   onPress,
 }: AccountCardProps) {
+  const getIcon = () => {
+    if (icon) return icon;
+    const icons: Record<string, string> = {
+      cash: '💵', bank: '🏦', upi: '📲', wallet: '👛', credit_card: '💳', debit_card: '💳',
+    };
+    return icons[type] || '💳';
+  };
+
   const getTypeLabel = () => {
     const typeMap: { [key: string]: string } = {
       upi: 'UPI',
@@ -37,7 +45,7 @@ export default function AccountCard({
     <Card onPress={onPress} padding={16}>
       <View style={styles.header}>
         <View style={styles.iconContainer}>
-          <Text style={styles.icon}>{icon || '💳'}</Text>
+          <Text style={styles.icon}>{getIcon()}</Text>
         </View>
         <View style={styles.headerText}>
           <Text style={styles.name}>{name}</Text>
@@ -57,13 +65,13 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 17,
   },
   iconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    backgroundColor: colors.background,
+    width: 50,
+    height: 50,
+    borderRadius: 17,
+    backgroundColor: '#ECEBFF',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
@@ -75,8 +83,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   name: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 15,
+    fontWeight: '800',
     color: colors.text,
     marginBottom: 2,
   },
@@ -92,16 +100,16 @@ const styles = StyleSheet.create({
   balanceContainer: {
     borderTopWidth: 1,
     borderTopColor: colors.border,
-    paddingTop: 12,
+    paddingTop: 14,
   },
   balanceLabel: {
-    fontSize: 12,
+    fontSize: 11,
     color: colors.textSecondary,
     marginBottom: 4,
   },
   balance: {
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 23,
+    fontWeight: '800',
     color: colors.text,
   },
 });

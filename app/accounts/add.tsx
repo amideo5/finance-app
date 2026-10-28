@@ -22,6 +22,10 @@ export default function AddAccountScreen() {
       Alert.alert('Check account details', 'Enter a name and a valid balance.');
       return;
     }
+    if (initialBalance < 0) {
+      Alert.alert('Invalid balance', 'An account cannot start with a negative available balance. Enter zero or a positive amount.');
+      return;
+    }
     if (!currentProfile) {
       Alert.alert('Profile unavailable', 'Select a profile before adding an account.');
       return;

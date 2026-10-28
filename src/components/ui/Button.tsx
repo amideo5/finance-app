@@ -71,7 +71,7 @@ export default function Button({
 
 const baseStyles = StyleSheet.create({
   button: {
-    borderRadius: 12,
+    borderRadius: 15,
     paddingVertical: 14,
     paddingHorizontal: 24,
     alignItems: 'center',
@@ -85,7 +85,7 @@ const baseStyles = StyleSheet.create({
   },
   outlineButton: {
     backgroundColor: 'transparent',
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: colors.primary,
   },
   dangerButton: {
