@@ -19,12 +19,15 @@ import {
   sum,
   where,
 } from 'firebase/firestore';
-import { Plus } from 'lucide-react-native';
+import { Plus, Sparkles, FileText } from 'lucide-react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function DashboardScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { currentProfile } = useProfile();
   const [loading, setLoading] = useState(false);
   const [balance, setBalance] = useState(0);
@@ -178,22 +181,25 @@ export default function DashboardScreen() {
   return (
     <ScrollView
       style={styles.container}
+      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 16 }}
       refreshControl={
         <RefreshControl refreshing={loading} onRefresh={onRefresh} />
       }
     >
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.greeting}>Hello</Text>
-          <Text style={styles.profileName}>{currentProfile?.name}</Text>
+      <LinearGradient colors={['#29265E', '#5146D8', '#7168F6']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.header, { paddingTop: Math.max(insets.top + 8, 52) }]}>
+        <View style={styles.headerCopy}>
+          <View style={styles.greetingRow}><Sparkles color="#D9D5FF" size={15} /><Text style={styles.greeting}>YOUR MONEY SPACE</Text></View>
+          <Text style={styles.profileName}>Hello, {currentProfile?.name?.split(' ')[0] || 'there'}</Text>
+          <Text style={styles.headerSubtitle}>A little more clarity, every day.</Text>
         </View>
         <TouchableOpacity
           style={styles.addButton}
           onPress={() => router.push('/transactions/add-expense')}
+          accessibilityLabel="Add transaction"
         >
-          <Plus color={colors.card} size={24} />
+          <Plus color={colors.primary} size={23} />
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
 
       <Card style={styles.balanceCard}>
         <Text style={styles.balanceLabel}>Total Balance</Text>
@@ -225,10 +231,16 @@ export default function DashboardScreen() {
 
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Recent Transactions</Text>
-          <TouchableOpacity onPress={() => router.push('/transactions')}>
-            <Text style={styles.sectionLink}>View All</Text>
-          </TouchableOpacity>
+          <View><Text style={styles.sectionTitle}>Recent Transactions</Text><Text style={styles.sectionSubtitle}>Your latest money moves</Text></View>
+          <View style={styles.sectionActions}>
+            {/* <TouchableOpacity style={styles.statementLink} onPress={() => router.push('/statement')}>
+              <FileText size={14} color={colors.primary} />
+              <Text style={styles.sectionLink}>Statement</Text>
+            </TouchableOpacity> */}
+            <TouchableOpacity onPress={() => router.push('/transactions')}>
+              <Text style={styles.sectionLink}>View all</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {recentTransactions.length === 0 ? (
@@ -267,31 +279,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 24,
-    paddingTop: 48,
-    marginBottom: 24,
-    backgroundColor: colors.textSecondary,
+    paddingHorizontal: 23,
+    paddingTop: 52,
+    paddingBottom: 28,
+    marginBottom: 22,
+    borderBottomLeftRadius: 30,
+    borderBottomRightRadius: 30,
   },
-  greeting: {
-    fontSize: 16,
-    color: colors.card,
-  },
-  profileName: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: colors.card,
-  },
+  headerCopy: { flex: 1 },
+  greetingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 9 },
+  greeting: { fontSize: 10, letterSpacing: 1.5, color: '#D9D5FF', fontWeight: '800' },
+  profileName: { fontSize: 25, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.5 },
+  headerSubtitle: { fontSize: 11, color: '#DDD9FF', marginTop: 5 },
   addButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.primary,
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
+    marginLeft: 12,
   },
   balanceCard: {
-    marginHorizontal: 24,
-    marginBottom: 24,
+    marginHorizontal: 18,
+    marginBottom: 26,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 22,
   },
   balanceLabel: {
     fontSize: 14,
@@ -339,11 +353,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
+  sectionSubtitle: { color: colors.textSecondary, fontSize: 11, marginTop: 4 },
+  sectionActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  statementLink: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 8, backgroundColor: '#ECEBFF', borderRadius: 11 },
   sectionTitle: {
     fontSize: 20,
     fontWeight: '700',
     color: colors.text,
-    marginBottom: 8,
+    marginBottom: 4,
   },
   sectionLink: {
     fontSize: 14,

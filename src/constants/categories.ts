@@ -1,5 +1,7 @@
 export const EXPENSE_CATEGORIES = [
   { id: 'food', name: 'Food & Dining', icon: '🍽️', color: '#EF4444' },
+  { id: 'groceries', name: 'Groceries', icon: '🛒', color: '#16A34A' },
+  { id: 'housing', name: 'Housing & Rent', icon: '🏠', color: '#8B5CF6' },
   { id: 'transportation', name: 'Transportation', icon: '🚗', color: '#F59E0B' },
   { id: 'shopping', name: 'Shopping', icon: '🛍️', color: '#8B5CF6' },
   { id: 'entertainment', name: 'Entertainment', icon: '🎬', color: '#EC4899' },
@@ -8,13 +10,33 @@ export const EXPENSE_CATEGORIES = [
   { id: 'education', name: 'Education', icon: '📚', color: '#6366F1' },
   { id: 'travel', name: 'Travel', icon: '✈️', color: '#14B8A6' },
   { id: 'personal_care', name: 'Personal Care', icon: '💆', color: '#F97316' },
+  { id: 'subscriptions', name: 'Subscriptions', icon: '📺', color: '#0EA5E9' },
+  { id: 'insurance', name: 'Insurance', icon: '🛡️', color: '#0D9488' },
+  { id: 'loan_emi', name: 'Loan EMI', icon: '🏦', color: '#64748B' },
+  { id: 'family_gifts', name: 'Family & Gifts', icon: '🎁', color: '#DB2777' },
+  { id: 'pets', name: 'Pets', icon: '🐾', color: '#B45309' },
+  { id: 'taxes_fees', name: 'Taxes & Fees', icon: '🧾', color: '#475569' },
+  { id: 'home_maintenance', name: 'Home Maintenance', icon: '🛠️', color: '#EA580C' },
+  { id: 'work_office', name: 'Work & Office', icon: '💻', color: '#2563EB' },
+  { id: 'donations', name: 'Donations', icon: '❤️', color: '#E11D48' },
   { id: 'misc', name: 'Other', icon: '📦', color: '#6B7280' },
 ];
 
 export const INCOME_CATEGORIES = [
   { id: 'salary', name: 'Salary', icon: '💼', color: '#10B981' },
+  { id: 'freelance', name: 'Freelance', icon: '🧑‍💻', color: '#0EA5E9' },
+  { id: 'bonus', name: 'Bonus', icon: '🎉', color: '#F59E0B' },
   { id: 'business_income', name: 'Business', icon: '🏢', color: '#3B82F6' },
   { id: 'investments', name: 'Investments', icon: '📈', color: '#8B5CF6' },
+  { id: 'interest', name: 'Interest', icon: '🏦', color: '#0D9488' },
+  { id: 'dividends', name: 'Dividends', icon: '💹', color: '#2563EB' },
+  { id: 'rental_income', name: 'Rental Income', icon: '🏘️', color: '#7C3AED' },
+  { id: 'cashback', name: 'Cashback', icon: '💳', color: '#DB2777' },
+  { id: 'refunds', name: 'Refunds', icon: '↩️', color: '#EA580C' },
+  { id: 'gifts', name: 'Gifts', icon: '🎁', color: '#E11D48' },
+  { id: 'pension', name: 'Pension', icon: '🪙', color: '#64748B' },
+  { id: 'reimbursement', name: 'Reimbursement', icon: '🧾', color: '#0891B2' },
+  { id: 'commission', name: 'Commission', icon: '🤝', color: '#65A30D' },
   { id: 'other_income', name: 'Other Income', icon: '💰', color: '#6B7280' },
 ];
 

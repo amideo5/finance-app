@@ -1255,6 +1255,22 @@ async function requestFriendSettlement(
       return { settlementId };
     }
 
+    // A request does not debit the account yet, but don't let users propose a
+    // payment their selected funding account cannot currently cover. We repeat
+    // the check at acceptance because the balance may change while it is pending.
+    const payerAccountForRequest = fsDocData(payerAccountDoc);
+    const payerBalanceForRequest = Number(payerAccountForRequest.balance ?? 0);
+    if (!Number.isFinite(payerBalanceForRequest)) {
+      throw new Error("The selected payer account has an invalid balance");
+    }
+    const availablePaiseForRequest = Math.round(payerBalanceForRequest * 100);
+    if (availablePaiseForRequest < amountInPaise) {
+      const accountName = typeof payerAccountForRequest.name === "string" && payerAccountForRequest.name.trim()
+        ? payerAccountForRequest.name.trim()
+        : "selected account";
+      throw new Error(`Insufficient balance in ${accountName}. Available ₹${(availablePaiseForRequest / 100).toFixed(2)}, required ₹${(amountInPaise / 100).toFixed(2)}. Choose another account or add funds first.`);
+    }
+
     await assertUsersAreFriendsInTransaction(uid, toUserId, transactionId);
     const networkUserIds = await getConnectedNetworkUserIdsInTransaction(uid, transactionId);
     if (!networkUserIds.has(toUserId)) {
@@ -1371,6 +1387,13 @@ async function acceptFriendSettlement(
     if (!Number.isFinite(payerBalance) || !Number.isFinite(recipientBalance)) {
       throw new Error("Both selected accounts must have valid numeric balances");
     }
+    const payerBalancePaise = Math.round(payerBalance * 100);
+    if (payerBalancePaise < amountInPaise) {
+      const accountName = typeof payerAccount.name === "string" && payerAccount.name.trim()
+        ? payerAccount.name.trim()
+        : "selected account";
+      throw new Error(`Insufficient balance in ${accountName}. Available ₹${(payerBalancePaise / 100).toFixed(2)}, required ₹${(amountInPaise / 100).toFixed(2)}. The sender must add funds or cancel and resend from a funded account.`);
+    }
     const amount = amountInPaise / 100;
     const now = new Date().toISOString();
     const date = now.slice(0, 10);
@@ -1404,7 +1427,7 @@ async function acceptFriendSettlement(
     await commitFirestoreTransaction(transactionId, [
       { update: { name: fsDocumentName(payerTransactionPath), fields: Object.fromEntries(Object.entries(payerTransaction).map(([key, value]) => [key, fsEncode(value)])) }, currentDocument: { exists: false } },
       { update: { name: fsDocumentName(recipientTransactionPath), fields: Object.fromEntries(Object.entries(recipientTransaction).map(([key, value]) => [key, fsEncode(value)])) }, currentDocument: { exists: false } },
-      { update: { name: fsDocumentName(`profiles/${fromProfileId}/accounts/${fromAccountId}`), fields: { balance: fsEncode(Math.round((payerBalance - amount) * 100) / 100), updatedAt: fsEncode(now) } }, updateMask: { fieldPaths: ["balance", "updatedAt"] }, currentDocument: { exists: true } },
+      { update: { name: fsDocumentName(`profiles/${fromProfileId}/accounts/${fromAccountId}`), fields: { balance: fsEncode((payerBalancePaise - amountInPaise) / 100), updatedAt: fsEncode(now) } }, updateMask: { fieldPaths: ["balance", "updatedAt"] }, currentDocument: { exists: true } },
       { update: { name: fsDocumentName(`profiles/${recipientProfileId}/accounts/${recipientAccountId}`), fields: { balance: fsEncode(Math.round((recipientBalance + amount) * 100) / 100), updatedAt: fsEncode(now) } }, updateMask: { fieldPaths: ["balance", "updatedAt"] }, currentDocument: { exists: true } },
       { update: { name: fsDocumentName(settlementPath), fields: Object.fromEntries(Object.entries({ status: "accepted", acceptedAt: now, acceptedBy: uid, recipientProfileId, recipientAccountId, payerTransactionId, recipientTransactionId }).map(([key, value]) => [key, fsEncode(value)])) }, updateMask: { fieldPaths: ["status", "acceptedAt", "acceptedBy", "recipientProfileId", "recipientAccountId", "payerTransactionId", "recipientTransactionId"] }, currentDocument: { exists: true } },
       settlementLedgerLockWrite(ledgerLockDoc),

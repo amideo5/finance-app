@@ -22,7 +22,8 @@
       "@react-native-community/datetimepicker",
       "expo-secure-store",
       "expo-splash-screen",
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true

@@ -5,6 +5,7 @@ import { useProfile } from '@/src/context/ProfileContext';
 import { db } from '@/src/firebaseConfig';
 import { getUserSplits } from '@/src/services/firebase/splitService';
 import { useRouter } from 'expo-router';
+import { ArrowLeftRight, FileText, SlidersHorizontal } from 'lucide-react-native';
 import {
     collection,
     getDocs,
@@ -26,11 +27,13 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const PAGE_SIZE = 30;
 
 export default function TransactionsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { currentProfile } = useProfile();
 
   const [transactions, setTransactions] = useState<any[]>([]);
@@ -112,35 +115,69 @@ export default function TransactionsScreen() {
     void loadTransactions(true);
   }, [loadTransactions]);
 
+  const activeFilterLabels: string[] = [];
+  if (filters.type && filters.type !== 'all') {
+    activeFilterLabels.push(filters.type === 'income' ? 'Income' : 'Expense');
+  }
+  if (filters.categories?.length) {
+    activeFilterLabels.push(filters.categories.length === 1
+      ? filters.categories[0]
+      : `${filters.categories.length} categories`);
+  }
+  if (filters.startDate || filters.endDate) {
+    activeFilterLabels.push(`${filters.startDate || 'Any date'} – ${filters.endDate || 'Today'}`);
+  }
+  const activeFilterCount = activeFilterLabels.length;
+
   return (
     <View style={styles.container}>
-      <View style={{ height: 20 }} />
-
       {/* HEADER */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Transactions</Text>
-
-        <View style={{ flexDirection: 'row', gap: 16 }}>
-          <TouchableOpacity onPress={() => router.push('/transactions/self-transfer')}>
-            <Text style={styles.filterBtn}>Transfer</Text>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top + 8, 28) }]}>
+        <View style={styles.headerCopy}>
+          <Text style={styles.eyebrow}>YOUR ACTIVITY</Text>
+          <Text style={styles.title}>Transactions</Text>
+          <Text style={styles.subtitle}>Every move, all in one place.</Text>
+        </View>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.iconAction} onPress={() => router.push('/statement')} accessibilityLabel="Generate statement">
+            <FileText size={18} color={colors.primary} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => setFilterVisible(true)}>
-            <Text style={styles.filterBtn}>Filter</Text>
+          <TouchableOpacity style={styles.iconAction} onPress={() => router.push('/transactions/self-transfer')} accessibilityLabel="Transfer">
+            <ArrowLeftRight size={18} color={colors.primary} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.filterAction, activeFilterCount > 0 && styles.filterActionActive]}
+            onPress={() => setFilterVisible(true)}
+            accessibilityLabel={activeFilterCount > 0 ? `Filter transactions, ${activeFilterCount} filter groups active` : 'Filter transactions'}
+          >
+            <SlidersHorizontal size={16} color="#FFFFFF" />
+            <Text style={styles.filterActionText}>Filter</Text>
+            {activeFilterCount > 0 ? (
+              <View style={styles.filterBadge}><Text style={styles.filterBadgeText}>{activeFilterCount}</Text></View>
+            ) : null}
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* ACTIVE FILTER INDICATOR */}
-      {((filters.type && filters.type !== 'all') ||
-        filters.categories?.length ||
-        filters.startDate ||
-        filters.endDate) && (
+      {/* ACTIVE FILTER SUMMARY */}
+      {activeFilterCount > 0 ? (
         <View style={styles.activeFilters}>
-          <Text style={styles.activeText}>
-            Filters applied
-          </Text>
+          <View style={styles.activeFiltersHeading}>
+            <Text style={styles.activeFiltersTitle}>ACTIVE FILTERS</Text>
+            <Text style={styles.activeFiltersCount}>{activeFilterCount} applied</Text>
+          </View>
+          <View style={styles.activeChipRow}>
+            {activeFilterLabels.map((label) => (
+              <View key={label} style={styles.activeChip}>
+                <Text numberOfLines={1} style={styles.activeChipText}>{label}</Text>
+              </View>
+            ))}
+            <TouchableOpacity onPress={() => setFilterVisible(true)} style={styles.editFiltersButton}>
+              <Text style={styles.editFiltersText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      )}
+      ) : null}
 
       {/* LIST */}
       <FlatList
@@ -169,7 +206,7 @@ export default function TransactionsScreen() {
         )}
         ListEmptyComponent={loading ? null : <Text style={styles.empty}>No transactions found</Text>}
         ListFooterComponent={loadingMore ? <ActivityIndicator color={colors.primary} /> : null}
-        contentContainerStyle={transactions.length === 0 ? styles.emptyList : undefined}
+        contentContainerStyle={[transactions.length === 0 ? styles.emptyList : undefined, { paddingBottom: Math.max(insets.bottom, 16) + 20 }]}
       />
 
       {/* 🔥 FILTER SHEET */}
@@ -191,29 +228,43 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 24,
-    paddingTop: 48,
+    paddingHorizontal: 20,
+    paddingTop: 28,
+    paddingBottom: 18,
+    gap: 10,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: colors.text,
-  },
-  filterBtn: {
-    color: colors.primary,
-    fontWeight: '600',
-  },
+  headerCopy: { flex: 1 },
+  eyebrow: { fontSize: 10, letterSpacing: 1.5, color: colors.primary, fontWeight: '800', marginBottom: 5 },
+  title: { fontSize: 27, fontWeight: '800', color: colors.text, letterSpacing: -0.5 },
+  subtitle: { fontSize: 11, color: colors.textSecondary, marginTop: 4 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  iconAction: { width: 37, height: 37, borderRadius: 13, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  filterAction: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.primary, paddingVertical: 10, paddingHorizontal: 11, borderRadius: 13, minHeight: 38 },
+  filterActionActive: { backgroundColor: colors.primaryDark },
+  filterActionText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  filterBadge: { minWidth: 18, height: 18, paddingHorizontal: 4, borderRadius: 99, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' },
+  filterBadgeText: { color: colors.primary, fontSize: 10, fontWeight: '900' },
   activeFilters: {
-    paddingHorizontal: 24,
-    marginBottom: 8,
+    marginHorizontal: 18,
+    marginTop: -3,
+    marginBottom: 11,
+    padding: 11,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: '#E1DFFF',
+    backgroundColor: '#F0EFFF',
   },
-  activeText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-  },
+  activeFiltersHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7 },
+  activeFiltersTitle: { color: colors.primaryDark, fontSize: 9, fontWeight: '900', letterSpacing: 1.1 },
+  activeFiltersCount: { color: colors.textSecondary, fontSize: 10, fontWeight: '700' },
+  activeChipRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
+  activeChip: { maxWidth: '100%', backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E1DFFF', borderRadius: 99, paddingHorizontal: 9, paddingVertical: 5 },
+  activeChipText: { color: colors.primaryDark, fontSize: 10, fontWeight: '700' },
+  editFiltersButton: { paddingHorizontal: 9, paddingVertical: 5, borderRadius: 99, backgroundColor: colors.primary },
+  editFiltersText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
   list: {
     flex: 1,
-    paddingHorizontal: 24,
+    paddingHorizontal: 18,
   },
   emptyList: {
     flexGrow: 1,

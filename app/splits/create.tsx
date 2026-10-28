@@ -1,7 +1,10 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { ArrowLeft, Check, ChevronRight, Info, ReceiptText, Sparkles, UsersRound, WalletCards } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import { db } from '@/src/firebaseConfig';
@@ -34,6 +37,7 @@ export default function CreateSplit() {
   const routeTransactionId = Array.isArray(params.txId) ? params.txId[0] : params.txId;
   const { currentProfile } = useProfile();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const userId = currentProfile?.userId;
 
   const [selectedTransactionId, setSelectedTransactionId] = useState(routeTransactionId || '');
@@ -164,134 +168,346 @@ export default function CreateSplit() {
     }
   };
 
-  if (loading) return <View style={styles.center}><Text>Loading eligible expense…</Text></View>;
+  if (loading) return (
+    <View style={styles.center}>
+      <View style={styles.loadingIcon}><UsersRound color={colors.primary} size={26} /></View>
+      <ActivityIndicator color={colors.primary} size="small" />
+      <Text style={styles.loadingText}>Preparing your shared expense…</Text>
+    </View>
+  );
+
   if (!source) return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <TouchableOpacity onPress={() => router.back()}><Text style={styles.back}>← Back</Text></TouchableOpacity>
-      <Text style={styles.title}>{selectedTransactionId ? 'Expense unavailable' : 'Choose an expense'}</Text>
-      <Text style={styles.help}>Select an existing INR expense from your active profile. The original transaction will not be changed.</Text>
-      {selectedTransactionId && <TouchableOpacity style={styles.button} onPress={() => setSelectedTransactionId('')}><Text style={styles.buttonText}>Choose a different expense</Text></TouchableOpacity>}
-      {!selectedTransactionId && eligibleExpenses.map((expense) => (
-        <TouchableOpacity key={expense.id} style={styles.card} onPress={() => setSelectedTransactionId(expense.id)}>
-          <Text style={styles.choiceTitle}>{expense.category || 'Expense'} · {expense.date}</Text>
-          <Text style={styles.shareAmount}>₹{Number(expense.amount).toFixed(2)}</Text>
-          {expense.notes ? <Text style={styles.help}>{expense.notes}</Text> : null}
+    <View style={styles.screen}>
+      <ScrollView style={styles.container} contentContainerStyle={[styles.pageContent, { paddingTop: Math.max(insets.top + 8, 20), paddingBottom: Math.max(insets.bottom, 20) + 28 }]}>
+        <TouchableOpacity accessibilityRole="button" style={styles.backButton} onPress={() => router.back()}>
+          <ArrowLeft color={colors.text} size={18} />
+          <Text style={styles.backLabel}>Back</Text>
         </TouchableOpacity>
-      ))}
-      {!selectedTransactionId && eligibleExpenses.length === 0 && <Text style={styles.help}>No eligible INR expenses were found in this profile.</Text>}
-    </ScrollView>
+
+        <View style={styles.pageIntro}>
+          <View style={styles.eyebrow}><UsersRound size={14} color={colors.primary} /><Text style={styles.eyebrowText}>SHARED EXPENSES</Text></View>
+          <Text style={styles.title}>{selectedTransactionId ? 'Expense unavailable' : 'Choose an expense'}</Text>
+          <Text style={styles.subtitle}>Pick an existing expense to create a split with your friends. Your original transaction will stay unchanged.</Text>
+        </View>
+
+        {selectedTransactionId ? (
+          <View style={styles.emptyCard}>
+            <View style={styles.emptyIcon}><ReceiptText size={26} color={colors.primary} /></View>
+            <Text style={styles.emptyTitle}>This expense can’t be used</Text>
+            <Text style={styles.help}>Choose a different eligible INR expense from your active profile. The original transaction will not be changed.</Text>
+            <TouchableOpacity style={styles.primaryButton} onPress={() => setSelectedTransactionId('')}>
+              <Text style={styles.primaryButtonText}>Choose another expense</Text><ChevronRight color="#FFFFFF" size={18} />
+            </TouchableOpacity>
+          </View>
+        ) : eligibleExpenses.length > 0 ? (
+          <View style={styles.sectionCard}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionIcon}><WalletCards size={18} color={colors.primary} /></View>
+              <View style={styles.sectionHeaderCopy}>
+                <Text style={styles.sectionTitle}>Eligible expenses</Text>
+                <Text style={styles.sectionCaption}>{eligibleExpenses.length} expense{eligibleExpenses.length === 1 ? '' : 's'} available to split</Text>
+              </View>
+            </View>
+            {eligibleExpenses.map((expense) => (
+              <TouchableOpacity key={expense.id} activeOpacity={0.82} style={styles.expenseOption} onPress={() => setSelectedTransactionId(expense.id)}>
+                <View style={styles.expenseIcon}><ReceiptText size={19} color={colors.primary} /></View>
+                <View style={styles.expenseOptionBody}>
+                  <Text style={styles.choiceTitle} numberOfLines={1}>{expense.category || 'Expense'}</Text>
+                  <Text style={styles.help}>{expense.date || 'Date unavailable'}{expense.notes ? ` · ${expense.notes}` : ''}</Text>
+                </View>
+                <View style={styles.expenseOptionTrailing}>
+                  <Text style={styles.shareAmount}>₹{Number(expense.amount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
+                  <ChevronRight size={17} color={colors.textLight} />
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : (
+          <View style={styles.emptyCard}>
+            <View style={styles.emptyIcon}><ReceiptText size={26} color={colors.primary} /></View>
+            <Text style={styles.emptyTitle}>No eligible expenses yet</Text>
+            <Text style={styles.help}>Only existing INR expenses can be selected for a shared expense.</Text>
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <TouchableOpacity onPress={() => router.back()}><Text style={styles.back}>← Back</Text></TouchableOpacity>
-      <Text style={styles.title}>Create shared expense</Text>
-      <Text style={styles.subtitle}>Original payment by {currentProfile?.name || 'you'}</Text>
+    <View style={styles.screen}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={[styles.pageContent, { paddingTop: Math.max(insets.top + 8, 20), paddingBottom: 24 }]}
+        keyboardShouldPersistTaps="handled"
+      >
+        <TouchableOpacity accessibilityRole="button" style={styles.backButton} onPress={() => router.back()}>
+          <ArrowLeft color={colors.text} size={18} />
+          <Text style={styles.backLabel}>Back</Text>
+        </TouchableOpacity>
 
-      <View style={styles.card}>
-        <Text style={styles.label}>Linked expense</Text>
-        <Text style={styles.amount}>{money(totalAmountInPaise)}</Text>
-        <Text style={styles.help}>{source.category || 'Expense'} · {source.date}</Text>
-        <Text style={styles.note}>The original transaction stays unchanged. It will not be duplicated.</Text>
-      </View>
-
-      <Text style={styles.label}>Title</Text>
-      <TextInput value={title} onChangeText={setTitle} style={styles.input} placeholder="Dinner, trip, groceries…" />
-      <Text style={styles.label}>Description (optional)</Text>
-      <TextInput value={description} onChangeText={setDescription} style={[styles.input, styles.multiline]} multiline placeholder="Add a note" />
-
-      <Text style={styles.sectionTitle}>Allocation participants</Text>
-      <TouchableOpacity style={styles.choice} onPress={() => setIncludeCreator((value) => !value)}>
-        <Text style={[styles.checkbox, includeCreator && styles.checked]}>{includeCreator ? '✓' : ''}</Text>
-        <View style={styles.choiceBody}>
-          <Text style={styles.choiceTitle}>Include me in the expense allocation</Text>
-          <Text style={styles.help}>{includeCreator ? 'Your share is included normally.' : 'Your allocation is zero; other shares cover the full expense.'}</Text>
+        <View style={styles.pageIntro}>
+          <View style={styles.eyebrow}><Sparkles size={14} color={colors.primary} /><Text style={styles.eyebrowText}>SHARED EXPENSES</Text></View>
+          <Text style={styles.title}>Create a split</Text>
+          <Text style={styles.subtitle}>Share a payment with friends and make sure every contribution adds up.</Text>
         </View>
-      </TouchableOpacity>
-      {friends.map((friend) => {
-        const active = selectedFriends.includes(friend.friendId);
-        return (
-          <TouchableOpacity key={friend.friendId} style={styles.choice} onPress={() => toggleFriend(friend.friendId)}>
-            <Text style={[styles.checkbox, active && styles.checked]}>{active ? '✓' : ''}</Text>
-            <Text style={styles.choiceTitle}>{friend.profileData?.name || friend.friendId}</Text>
-          </TouchableOpacity>
-        );
-      })}
-      {friends.length === 0 && <Text style={styles.help}>No accepted friends yet.</Text>}
 
-      <Text style={styles.sectionTitle}>Share method</Text>
-      <View style={styles.toggleRow}>
-        {(['equal', 'custom'] as const).map((method) => (
-          <TouchableOpacity key={method} style={[styles.toggle, splitType === method && styles.toggleActive]} onPress={() => setSplitType(method)}>
-            <Text style={[styles.toggleText, splitType === method && styles.toggleTextActive]}>{method === 'equal' ? 'Equal split' : 'Custom shares'}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-      {allocations.map((participant) => (
-        <View key={participant.userId} style={styles.shareRow}>
-          <Text style={styles.choiceTitle}>{participant.userId === userId ? 'You (payer)' : friendNames.get(participant.userId) || participant.userId}</Text>
-          {splitType === 'custom' ? (
-            <TextInput
-              value={customAmounts[participant.userId] ?? ''}
-              onChangeText={(value) => setCustomAmounts((previous) => ({ ...previous, [participant.userId]: value }))}
-              placeholder="₹0.00"
-              keyboardType="decimal-pad"
-              style={[styles.amountInput, customAmounts[participant.userId] !== undefined && rupeesToPaise(customAmounts[participant.userId], true) === null && styles.invalidInput]}
-            />
-          ) : <Text style={styles.shareAmount}>{money(participant.shareAmountInPaise)}</Text>}
+        <LinearGradient colors={['#29265E', '#5146D8', '#756BFF']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.expenseHero}>
+          <View style={styles.heroTopRow}>
+            <View style={styles.heroIcon}><ReceiptText size={20} color="#FFFFFF" /></View>
+            <View style={styles.heroLinkedBadge}><Check size={12} color="#C7F9E5" /><Text style={styles.heroLinkedText}>LINKED EXPENSE</Text></View>
+          </View>
+          <Text style={styles.heroAmount}>{money(totalAmountInPaise)}</Text>
+          <Text style={styles.heroCategory}>{source.category || 'Expense'} <Text style={styles.heroDot}>·</Text> {source.date || 'Date unavailable'}</Text>
+          <View style={styles.heroDivider} />
+          <View style={styles.heroFooter}>
+            <View style={styles.heroInfoIcon}><Info size={14} color="#E2E0FF" /></View>
+            <Text style={styles.heroFootnote}>Original payment by {currentProfile?.name || 'you'}. This transaction won’t be duplicated or changed.</Text>
+          </View>
+        </LinearGradient>
+
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.stepBadge}><Text style={styles.stepText}>01</Text></View>
+            <View style={styles.sectionHeaderCopy}>
+              <Text style={styles.sectionTitle}>Split details</Text>
+              <Text style={styles.sectionCaption}>Give this shared expense a name</Text>
+            </View>
+          </View>
+          <Text style={styles.fieldLabel}>TITLE</Text>
+          <TextInput value={title} onChangeText={setTitle} style={styles.input} placeholder="Dinner, trip, groceries…" placeholderTextColor={colors.textLight} returnKeyType="next" />
+          <Text style={styles.fieldLabel}>DESCRIPTION <Text style={styles.optionalLabel}>OPTIONAL</Text></Text>
+          <TextInput value={description} onChangeText={setDescription} style={[styles.input, styles.multiline]} multiline placeholder="Add context for your friends" placeholderTextColor={colors.textLight} />
         </View>
-      ))}
 
-      <View style={styles.review}>
-        <Text style={styles.sectionTitle}>Review</Text>
-        <Text style={styles.reviewLine}>Expense total: {money(totalAmountInPaise)}</Text>
-        <Text style={styles.reviewLine}>Allocated total: {money(allocationTotal)}</Text>
-        <Text style={[styles.reviewLine, allocationValid ? styles.valid : styles.invalid]}>
-          {allocationValid ? 'Shares reconcile exactly' : 'Shares must equal the linked expense total'}
-        </Text>
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.stepBadge}><Text style={styles.stepText}>02</Text></View>
+            <View style={styles.sectionHeaderCopy}>
+              <Text style={styles.sectionTitle}>Who’s sharing?</Text>
+              <Text style={styles.sectionCaption}>Choose everyone whose share is included</Text>
+            </View>
+            <View style={styles.countPill}><Text style={styles.countPillText}>{participantIds.length}</Text></View>
+          </View>
+
+          <TouchableOpacity activeOpacity={0.82} style={[styles.personOption, includeCreator && styles.personOptionSelected]} onPress={() => setIncludeCreator((value) => !value)}>
+            <View style={[styles.avatar, styles.youAvatar]}><Text style={styles.youAvatarText}>{(currentProfile?.name || 'Y').trim().charAt(0).toUpperCase()}</Text></View>
+            <View style={styles.personOptionBody}>
+              <Text style={styles.choiceTitle}>{currentProfile?.name || 'You'} <Text style={styles.youTag}>YOU</Text></Text>
+              <Text style={styles.help}>{includeCreator ? 'Your share is included in the allocation' : 'Your share is excluded; friends cover the full amount'}</Text>
+            </View>
+            <View style={[styles.selectionMark, includeCreator && styles.selectionMarkActive]}>{includeCreator ? <Check color="#FFFFFF" size={14} /> : null}</View>
+          </TouchableOpacity>
+
+          {friends.map((friend) => {
+            const active = selectedFriends.includes(friend.friendId);
+            const name = friend.profileData?.name || friend.friendId;
+            return (
+              <TouchableOpacity key={friend.friendId} activeOpacity={0.82} style={[styles.personOption, active && styles.personOptionSelected]} onPress={() => toggleFriend(friend.friendId)}>
+                <View style={styles.avatar}><Text style={styles.avatarText}>{String(name).trim().charAt(0).toUpperCase()}</Text></View>
+                <View style={styles.personOptionBody}>
+                  <Text style={styles.choiceTitle} numberOfLines={1}>{name}</Text>
+                  <Text style={styles.help}>{active ? 'Included in this split' : 'Tap to add to this split'}</Text>
+                </View>
+                <View style={[styles.selectionMark, active && styles.selectionMarkActive]}>{active ? <Check color="#FFFFFF" size={14} /> : null}</View>
+              </TouchableOpacity>
+            );
+          })}
+          {friends.length === 0 && <View style={styles.inlineNotice}><Info color={colors.textSecondary} size={16} /><Text style={styles.inlineNoticeText}>No accepted friends yet. You can still review your own allocation.</Text></View>}
+        </View>
+
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.stepBadge}><Text style={styles.stepText}>03</Text></View>
+            <View style={styles.sectionHeaderCopy}>
+              <Text style={styles.sectionTitle}>Choose a share method</Text>
+              <Text style={styles.sectionCaption}>Decide how the total should be divided</Text>
+            </View>
+          </View>
+          <View style={styles.methodRow}>
+            <TouchableOpacity activeOpacity={0.85} style={[styles.methodCard, splitType === 'equal' && styles.methodCardSelected]} onPress={() => setSplitType('equal')}>
+              <View style={[styles.methodIcon, splitType === 'equal' && styles.methodIconSelected]}><UsersRound size={19} color={splitType === 'equal' ? '#FFFFFF' : colors.primary} /></View>
+              <Text style={[styles.methodTitle, splitType === 'equal' && styles.methodTitleSelected]}>Equal split</Text>
+              <Text style={[styles.methodCaption, splitType === 'equal' && styles.methodCaptionSelected]}>Divide evenly</Text>
+              {splitType === 'equal' ? <View style={styles.methodCheck}><Check size={12} color="#FFFFFF" /></View> : null}
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.85} style={[styles.methodCard, splitType === 'custom' && styles.methodCardSelected]} onPress={() => setSplitType('custom')}>
+              <View style={[styles.methodIcon, splitType === 'custom' && styles.methodIconSelected]}><WalletCards size={19} color={splitType === 'custom' ? '#FFFFFF' : colors.primary} /></View>
+              <Text style={[styles.methodTitle, splitType === 'custom' && styles.methodTitleSelected]}>Custom shares</Text>
+              <Text style={[styles.methodCaption, splitType === 'custom' && styles.methodCaptionSelected]}>Set each amount</Text>
+              {splitType === 'custom' ? <View style={styles.methodCheck}><Check size={12} color="#FFFFFF" /></View> : null}
+            </TouchableOpacity>
+          </View>
+
+          {allocations.length > 0 ? (
+            <View style={styles.allocationList}>
+              <View style={styles.allocationListHeader}><Text style={styles.fieldLabel}>PARTICIPANT</Text><Text style={styles.fieldLabel}>SHARE</Text></View>
+              {allocations.map((participant) => {
+                const name = participant.userId === userId ? currentProfile?.name || 'You' : friendNames.get(participant.userId) || participant.userId;
+                return (
+                  <View key={participant.userId} style={styles.shareRow}>
+                    <View style={styles.sharePerson}>
+                      <View style={[styles.avatar, participant.userId === userId && styles.youAvatar]}><Text style={[styles.avatarText, participant.userId === userId && styles.youAvatarText]}>{String(name).trim().charAt(0).toUpperCase()}</Text></View>
+                      <View style={styles.sharePersonCopy}><Text style={styles.sharePersonName} numberOfLines={1}>{name}</Text><Text style={styles.sharePersonRole}>{participant.userId === userId ? 'Original payer' : 'Participant'}</Text></View>
+                    </View>
+                    {splitType === 'custom' ? (
+                      <View style={styles.customAmountWrap}>
+                        <Text style={styles.currencyPrefix}>₹</Text>
+                        <TextInput
+                          value={customAmounts[participant.userId] ?? ''}
+                          onChangeText={(value) => setCustomAmounts((previous) => ({ ...previous, [participant.userId]: value }))}
+                          placeholder="0.00"
+                          placeholderTextColor={colors.textLight}
+                          keyboardType="decimal-pad"
+                          accessibilityLabel={`Share amount for ${name}`}
+                          style={[styles.amountInput, customAmounts[participant.userId] !== undefined && rupeesToPaise(customAmounts[participant.userId], true) === null && styles.invalidInput]}
+                        />
+                      </View>
+                    ) : <Text style={styles.shareAmount}>{money(participant.shareAmountInPaise)}</Text>}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <View style={styles.emptyAllocation}><Text style={styles.help}>Select yourself or at least one friend to see the allocation.</Text></View>
+          )}
+        </View>
+
+        <View style={[styles.reviewCard, allocationValid ? styles.reviewValid : styles.reviewWarning]}>
+          <View style={styles.reviewHeader}>
+            <View style={[styles.reviewStatusIcon, allocationValid ? styles.reviewStatusIconValid : styles.reviewStatusIconWarning]}>{allocationValid ? <Check color="#FFFFFF" size={15} /> : <Info color="#FFFFFF" size={15} />}</View>
+            <View style={styles.reviewHeaderCopy}>
+              <Text style={styles.reviewTitle}>{allocationValid ? 'Everything adds up' : 'Allocation needs attention'}</Text>
+              <Text style={styles.reviewCaption}>{allocationValid ? 'Your shares match the original expense exactly.' : 'Adjust participants or amounts so the allocation matches the expense.'}</Text>
+            </View>
+          </View>
+          <View style={styles.reviewMetrics}>
+            <View style={styles.reviewMetric}><Text style={styles.reviewMetricLabel}>EXPENSE TOTAL</Text><Text style={styles.reviewMetricValue}>{money(totalAmountInPaise)}</Text></View>
+            <View style={styles.reviewMetricDivider} />
+            <View style={styles.reviewMetric}><Text style={styles.reviewMetricLabel}>ALLOCATED</Text><Text style={styles.reviewMetricValue}>{money(allocationTotal)}</Text></View>
+          </View>
+          <Text style={[styles.reviewLine, allocationValid ? styles.valid : styles.invalid]}>{allocationValid ? '✓ Shares reconcile exactly' : 'Shares must equal the linked expense total'}</Text>
+        </View>
+      </ScrollView>
+
+      <View style={[styles.stickyFooter, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+        <View style={styles.footerSummary}><Text style={styles.footerSummaryLabel}>{participantIds.length} participant{participantIds.length === 1 ? '' : 's'}</Text><Text style={styles.footerSummaryAmount}>{money(totalAmountInPaise)}</Text></View>
+        <TouchableOpacity accessibilityRole="button" disabled={!allocationValid || saving} style={[styles.primaryButton, styles.footerButton, (!allocationValid || saving) && styles.buttonDisabled]} onPress={() => void handleCreate()}>
+          <Text style={styles.primaryButtonText}>{saving ? 'Creating split…' : 'Create split'}</Text>
+          {!saving ? <ChevronRight color="#FFFFFF" size={19} /> : <ActivityIndicator color="#FFFFFF" size="small" />}
+        </TouchableOpacity>
       </View>
-
-      <TouchableOpacity disabled={!allocationValid || saving} style={[styles.button, (!allocationValid || saving) && styles.buttonDisabled]} onPress={() => void handleCreate()}>
-        <Text style={styles.buttonText}>{saving ? 'Creating…' : 'Create split'}</Text>
-      </TouchableOpacity>
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: colors.background },
   container: { flex: 1, backgroundColor: colors.background },
-  content: { padding: 24, paddingBottom: 48 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
-  back: { color: colors.primary, marginBottom: 18, fontWeight: '600' },
-  title: { color: colors.text, fontSize: 25, fontWeight: '700' },
-  subtitle: { color: colors.textSecondary, marginTop: 6, marginBottom: 18 },
-  card: { backgroundColor: colors.card, borderRadius: 14, padding: 18, marginBottom: 18 },
-  label: { color: colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: 7 },
-  amount: { color: colors.text, fontSize: 30, fontWeight: '700', marginVertical: 4 },
-  help: { color: colors.textSecondary, fontSize: 13, marginTop: 3 },
-  note: { color: colors.textSecondary, fontSize: 12, marginTop: 12 },
-  input: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 12, marginBottom: 14, color: colors.text },
-  multiline: { minHeight: 72, textAlignVertical: 'top' },
-  sectionTitle: { color: colors.text, fontSize: 17, fontWeight: '700', marginTop: 12, marginBottom: 10 },
-  choice: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, gap: 10 },
-  choiceBody: { flex: 1 },
-  checkbox: { borderWidth: 1, borderColor: colors.border, width: 22, height: 22, borderRadius: 6, textAlign: 'center', color: '#fff', overflow: 'hidden' },
-  checked: { backgroundColor: colors.primary, borderColor: colors.primary },
-  choiceTitle: { color: colors.text, fontWeight: '500', flex: 1 },
-  toggleRow: { flexDirection: 'row', gap: 8 },
-  toggle: { flex: 1, borderRadius: 10, borderWidth: 1, borderColor: colors.border, padding: 12, alignItems: 'center' },
-  toggleActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  toggleText: { color: colors.textSecondary, fontWeight: '600' },
-  toggleTextActive: { color: '#fff' },
-  shareRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: 10 },
-  shareAmount: { color: colors.text, fontWeight: '700' },
-  amountInput: { minWidth: 110, borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 8, textAlign: 'right', color: colors.text },
-  invalidInput: { borderColor: colors.expense },
-  review: { backgroundColor: colors.card, borderRadius: 12, padding: 16, marginTop: 18 },
-  reviewLine: { color: colors.text, marginTop: 5 },
-  valid: { color: colors.income, fontWeight: '600' },
-  invalid: { color: colors.expense, fontWeight: '600' },
-  button: { marginTop: 20, padding: 16, borderRadius: 12, backgroundColor: colors.primary },
+  pageContent: { paddingHorizontal: 20, paddingBottom: 28, gap: 14 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 13, backgroundColor: colors.background, padding: 24 },
+  loadingIcon: { width: 58, height: 58, borderRadius: 20, backgroundColor: '#ECEBFF', alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
+  loadingText: { color: colors.textSecondary, fontSize: 14, fontWeight: '500' },
+  backButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 13, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, marginBottom: 2 },
+  backLabel: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  pageIntro: { gap: 6, marginBottom: 3 },
+  eyebrow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
+  eyebrowText: { color: colors.primary, fontSize: 10, fontWeight: '800', letterSpacing: 1.4 },
+  title: { color: colors.text, fontSize: 29, lineHeight: 35, fontWeight: '800', letterSpacing: -0.8 },
+  subtitle: { color: colors.textSecondary, fontSize: 14, lineHeight: 21, marginTop: 1 },
+  expenseHero: { borderRadius: 23, padding: 20, marginTop: 2, marginBottom: 2, overflow: 'hidden' },
+  heroTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  heroIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.16)', alignItems: 'center', justifyContent: 'center' },
+  heroLinkedBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: 'rgba(255,255,255,0.13)' },
+  heroLinkedText: { color: '#F1F0FF', fontWeight: '800', letterSpacing: 0.9, fontSize: 9 },
+  heroAmount: { color: '#FFFFFF', fontSize: 35, fontWeight: '800', letterSpacing: -0.7, marginTop: 18 },
+  heroCategory: { color: '#E2E0FF', marginTop: 4, fontSize: 13, fontWeight: '500' },
+  heroDot: { color: '#B8B3FF' },
+  heroDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.2)', marginVertical: 17 },
+  heroFooter: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  heroInfoIcon: { marginTop: 1 },
+  heroFootnote: { color: '#E4E2FF', fontSize: 12, lineHeight: 18, flex: 1 },
+  sectionCard: { backgroundColor: colors.card, borderRadius: 20, padding: 16, borderWidth: 1, borderColor: '#ECECF5', gap: 10, shadowColor: '#20224A', shadowOpacity: 0.035, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 1 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 5 },
+  sectionHeaderCopy: { flex: 1, gap: 2 },
+  sectionIcon: { width: 38, height: 38, borderRadius: 13, backgroundColor: '#F0EFFF', alignItems: 'center', justifyContent: 'center' },
+  stepBadge: { width: 34, height: 34, borderRadius: 12, backgroundColor: '#F0EFFF', alignItems: 'center', justifyContent: 'center' },
+  stepText: { fontSize: 12, color: colors.primary, fontWeight: '800' },
+  sectionTitle: { color: colors.text, fontSize: 16, lineHeight: 20, fontWeight: '800' },
+  sectionCaption: { color: colors.textSecondary, fontSize: 12, lineHeight: 17 },
+  fieldLabel: { color: colors.textSecondary, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginTop: 5 },
+  optionalLabel: { color: colors.textLight, fontWeight: '700', letterSpacing: 0.5 },
+  input: { backgroundColor: '#FAFAFE', borderWidth: 1, borderColor: colors.border, borderRadius: 13, paddingHorizontal: 13, paddingVertical: 12, minHeight: 47, color: colors.text, fontSize: 14 },
+  multiline: { minHeight: 86, textAlignVertical: 'top' },
+  countPill: { minWidth: 28, height: 28, paddingHorizontal: 7, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F0EFFF' },
+  countPillText: { color: colors.primary, fontSize: 12, fontWeight: '800' },
+  personOption: { borderWidth: 1, borderColor: colors.border, borderRadius: 15, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#FFFFFF' },
+  personOptionSelected: { borderColor: '#B9B4FF', backgroundColor: '#F8F7FF' },
+  avatar: { width: 42, height: 42, borderRadius: 15, backgroundColor: '#EFF1F9', alignItems: 'center', justifyContent: 'center' },
+  avatarText: { color: '#5D6281', fontSize: 15, fontWeight: '800' },
+  youAvatar: { backgroundColor: '#E7E5FF' },
+  youAvatarText: { color: colors.primary },
+  personOptionBody: { flex: 1, gap: 3 },
+  choiceTitle: { color: colors.text, fontSize: 14, fontWeight: '700', flexShrink: 1 },
+  youTag: { color: colors.primary, fontSize: 9, letterSpacing: 0.7 },
+  help: { color: colors.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 1 },
+  selectionMark: { width: 23, height: 23, borderRadius: 8, borderWidth: 1.5, borderColor: '#D4D7E5', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF' },
+  selectionMarkActive: { borderColor: colors.primary, backgroundColor: colors.primary },
+  inlineNotice: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, padding: 12, borderRadius: 13, backgroundColor: '#F7F7FB' },
+  inlineNoticeText: { color: colors.textSecondary, fontSize: 12, lineHeight: 17, flex: 1 },
+  methodRow: { flexDirection: 'row', gap: 10 },
+  methodCard: { flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: 12, gap: 5, backgroundColor: '#FFFFFF', position: 'relative' },
+  methodCardSelected: { borderColor: colors.primary, backgroundColor: '#F8F7FF' },
+  methodIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: '#F0EFFF', alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
+  methodIconSelected: { backgroundColor: colors.primary },
+  methodTitle: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  methodTitleSelected: { color: colors.primary },
+  methodCaption: { color: colors.textSecondary, fontSize: 11, lineHeight: 15 },
+  methodCaptionSelected: { color: '#5A55AC' },
+  methodCheck: { position: 'absolute', top: 10, right: 10, width: 20, height: 20, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  allocationList: { marginTop: 8, borderTopWidth: 1, borderTopColor: '#EFF0F6', paddingTop: 10 },
+  allocationListHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 2, marginBottom: 4 },
+  shareRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#F0F1F6', paddingVertical: 11, gap: 12 },
+  sharePerson: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  sharePersonCopy: { flex: 1, gap: 2 },
+  sharePersonName: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  sharePersonRole: { color: colors.textSecondary, fontSize: 11 },
+  shareAmount: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  customAmountWrap: { flexDirection: 'row', alignItems: 'center', gap: 3, borderWidth: 1, borderColor: colors.border, borderRadius: 11, paddingHorizontal: 9, backgroundColor: '#FFFFFF' },
+  currencyPrefix: { color: colors.textSecondary, fontSize: 13, fontWeight: '700' },
+  amountInput: { minWidth: 76, maxWidth: 100, paddingVertical: 9, textAlign: 'right', color: colors.text, fontWeight: '700', fontSize: 13 },
+  invalidInput: { color: colors.expense },
+  emptyAllocation: { backgroundColor: '#F8F8FC', borderRadius: 13, padding: 14 },
+  reviewCard: { borderRadius: 19, borderWidth: 1, padding: 16, gap: 12 },
+  reviewValid: { backgroundColor: '#F3FBF7', borderColor: '#CDEEDF' },
+  reviewWarning: { backgroundColor: '#FFF9EF', borderColor: '#F6E1B8' },
+  reviewHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  reviewStatusIcon: { width: 31, height: 31, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+  reviewStatusIconValid: { backgroundColor: colors.income },
+  reviewStatusIconWarning: { backgroundColor: colors.warning },
+  reviewHeaderCopy: { flex: 1, gap: 2 },
+  reviewTitle: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  reviewCaption: { color: colors.textSecondary, fontSize: 12, lineHeight: 17 },
+  reviewMetrics: { flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 13, backgroundColor: 'rgba(255,255,255,0.72)' },
+  reviewMetric: { flex: 1, gap: 5 },
+  reviewMetricLabel: { color: colors.textSecondary, fontSize: 9, fontWeight: '800', letterSpacing: 0.8 },
+  reviewMetricValue: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  reviewMetricDivider: { width: 1, height: 34, backgroundColor: colors.border, marginHorizontal: 12 },
+  reviewLine: { fontSize: 12, fontWeight: '700' },
+  valid: { color: '#16875B' },
+  invalid: { color: '#B7791F' },
+  stickyFooter: { backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.border, paddingHorizontal: 20, paddingTop: 12, gap: 10 },
+  footerSummary: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  footerSummaryLabel: { color: colors.textSecondary, fontSize: 12, fontWeight: '600' },
+  footerSummaryAmount: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  primaryButton: { backgroundColor: colors.primary, borderRadius: 14, minHeight: 50, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  footerButton: { marginTop: 0 },
   buttonDisabled: { opacity: 0.45 },
-  buttonText: { textAlign: 'center', color: '#fff', fontWeight: '700' },
+  emptyCard: { backgroundColor: colors.card, borderRadius: 20, padding: 22, borderWidth: 1, borderColor: colors.border, alignItems: 'center', gap: 10 },
+  emptyIcon: { width: 56, height: 56, borderRadius: 19, backgroundColor: '#F0EFFF', alignItems: 'center', justifyContent: 'center', marginBottom: 3 },
+  emptyTitle: { color: colors.text, fontSize: 17, fontWeight: '800', textAlign: 'center' },
+  primaryButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  expenseOption: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#EFF0F6' },
+  expenseIcon: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F0EFFF' },
+  expenseOptionBody: { flex: 1, gap: 3 },
+  expenseOptionTrailing: { alignItems: 'flex-end', gap: 5 },
 });

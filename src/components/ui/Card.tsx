@@ -30,11 +30,13 @@ export default function Card({ children, style, onPress, padding = 16 }: CardPro
 const styles = StyleSheet.create({
   card: {
     backgroundColor: colors.card,
-    borderRadius: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    borderRadius: 19,
+    borderWidth: 1,
+    borderColor: colors.border,
+    shadowColor: '#30345E',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.045,
+    shadowRadius: 13,
+    elevation: 1,
   },
 });
