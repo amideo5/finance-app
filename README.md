@@ -66,3 +66,32 @@ Deploy Functions, rules, and indexes with Firebase CLI using `firebase deploy --
 - Account `balance` is currently the starting value entered when creating an account; transaction writes do not yet maintain account balances.
 - Deleting a profile document does not recursively delete its subcollections. Add a server-side cascade before enabling destructive profile deletion in production.
 - Run `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build:web` before deployment. Rules tests are in `tests/firestoreRules.test.mts`; callable integration tests are in `functions/test/emulator.test.js`.
+
+## Investments & Portfolio module
+
+The Investments tab tracks assets independently from daily income/expense entries. Supported asset classes are Fixed Deposits, Recurring Deposits, Mutual Funds, Stocks, and Other. A holding can store its provider, symbol/folio, units, notes, current value, and net invested capital.
+
+### Screens
+
+- **Portfolio** (`/(tabs)/investments`): consolidated current portfolio value, net invested capital, estimated gain/loss, allocation by asset class, portfolio-value history, holdings, and recent activity.
+- **Add investment** (`/investments/add`): creates a holding and opening ledger entry without changing a bank account or the daily finance ledger.
+- **Holding details** (`/investments/[investmentId]`): current value, invested capital, recorded gain/loss, quick actions, and per-holding history.
+- **Investment ledger** (`/investments/ledger`): chronological activity with holding selection, search, and filters.
+- **Record activity** (`/investments/activity`): contributions, withdrawals, interest, gains, losses, and market-value updates. These operations only update the investment portfolio.
+- **Transfer in** (`/investments/transfer`): moves funds from a linked bank-type account to a holding. The bank balance debit, primary finance expense (`Investment Transfer`), investment holding update, investment inflow ledger entry, and portfolio snapshot are committed in a single Firestore transaction. A failed write rejects the entire transfer.
+
+### Firestore model
+
+- `profiles/{profileId}/investments/{investmentId}` stores the holding.
+- `profiles/{profileId}/investments/{investmentId}/transactions/{transactionId}` stores that holding's independent ledger.
+- `profiles/{profileId}/investmentSnapshots/{snapshotId}` stores a portfolio-value and net-invested snapshot after each committed portfolio action.
+- `profiles/{profileId}/transactions/{transactionId}` is written by the investment module **only** for a bank-to-investment transfer, as an expense/outflow paired with the portfolio inflow.
+
+Values are stored in rupees for compatibility with the rest of the app and also in integer paise fields for arithmetic accuracy. The portfolio graph reflects values recorded in these snapshots; it is not a live brokerage/market-price integration. Stock and mutual-fund prices need periodic manual market-value updates unless a quote feed is added later.
+
+### Security rules
+
+`firestore.rules` now grants profile members read access to `investmentSnapshots`, with writes limited to profile editors/owners like the investment holding and ledger collections. Deploy the updated rules with:
+
+```sh
+firebase deploy --only firestore:rules

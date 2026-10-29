@@ -13,6 +13,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import {
   ArrowDownLeft,
   ArrowLeft,
+  ArrowLeftRight,
   ArrowUpRight,
   CalendarDays,
   CheckCircle2,
@@ -41,6 +42,8 @@ type TransactionRecord = {
   notes?: string | null;
   kind?: string;
   accountId?: string | null;
+  investmentTransferId?: string;
+  investmentTransferDirection?: 'in' | 'out';
 };
 
 function formatDate(value?: string) {
@@ -134,6 +137,7 @@ export default function TransactionDetail() {
       transaction.currency === 'INR' &&
       !transaction.kind,
   );
+  const isInvestmentTransfer = transaction?.kind === 'investment-transfer' || Boolean(transaction?.investmentTransferId);
   const isIncome = transaction?.type === 'income';
   const title = transaction?.title || transaction?.category || 'Transaction';
 
@@ -206,24 +210,24 @@ export default function TransactionDetail() {
         </View>
 
         <LinearGradient
-          colors={isIncome ? ['#12684E', '#15966A', '#24B783'] : ['#29265E', '#5146D8', '#6C63F5']}
+          colors={isIncome && !isInvestmentTransfer ? ['#12684E', '#15966A', '#24B783'] : ['#29265E', '#5146D8', '#6C63F5']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.hero}
         >
           <View style={styles.heroTopRow}>
             <View style={styles.heroIcon}>
-              {isIncome
+              {isInvestmentTransfer ? <ArrowLeftRight size={23} color="#FFFFFF" /> : isIncome
                 ? <ArrowDownLeft size={23} color="#FFFFFF" />
                 : <ArrowUpRight size={23} color="#FFFFFF" />}
             </View>
             <View style={styles.typePill}>
-              <Text style={styles.typePillText}>{displayLabel(transaction.type || 'transaction')}</Text>
+              <Text style={styles.typePillText}>{isInvestmentTransfer ? 'Transfer' : displayLabel(transaction.type || 'transaction')}</Text>
             </View>
           </View>
           <Text style={styles.heroCategory}>{title}</Text>
           <Text style={styles.amount}>
-            {isIncome ? '+' : transaction.type === 'expense' ? '−' : ''}
+            {isInvestmentTransfer ? '↔ ' : isIncome ? '+' : transaction.type === 'expense' ? '−' : ''}
             {formatAmount(transaction.amount, transaction.currency)}
           </Text>
           <View style={styles.heroDivider} />

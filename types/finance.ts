@@ -1,5 +1,6 @@
 export type TransactionType = 'income' | 'expense';
 export type SplitTransactionKind = 'source' | 'allocation' | 'repayment';
+export type FinanceTransactionKind = SplitTransactionKind | 'self-transfer' | 'investment-transfer';
 
 export type SplitType = 'equal' | 'custom';
 export type SplitStatus = 'pending_settlement' | 'partially_settled' | 'finalizing' | 'settled' | 'cancelled';
@@ -103,8 +104,8 @@ export interface FinanceTransaction {
   profileId: string;
   userId: string;
   type: TransactionType;
-  /** `allocation` is consumption; `repayment` is a transfer, not consumption/income. */
-  kind?: SplitTransactionKind;
+  /** Internal movements remain visible in history but are excluded from income/expense reports. */
+  kind?: FinanceTransactionKind;
   splitId?: string;
   settlementId?: string;
   friendSettlementId?: string;
@@ -124,6 +125,13 @@ export interface FinanceTransaction {
   /** Local calendar date in YYYY-MM-DD form, suitable for lexicographic queries. */
   date: string;
   currency: string;
+  /** Paired metadata on bank-to-investment and investment-to-bank transfers. */
+  investmentTransferId?: string;
+  investmentTransferDirection?: 'in' | 'out';
+  investmentLedgerEntryId?: string;
+  investmentId?: string;
+  investmentName?: string;
+  assetClass?: InvestmentAssetClass;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
@@ -145,4 +153,70 @@ export interface FinanceBudget {
   month: number;
   year: number;
   limitAmount: number;
+}
+
+export type InvestmentAssetClass =
+  | 'fixed_deposit'
+  | 'recurring_deposit'
+  | 'mutual_fund'
+  | 'stock'
+  | 'other';
+
+export type InvestmentActivityType =
+  | 'opening_balance'
+  | 'contribution'
+  | 'withdrawal'
+  | 'interest'
+  | 'gain'
+  | 'loss'
+  | 'market_value'
+  | 'bank_transfer';
+
+/** Investment holdings are stored separately from the primary finance ledger. */
+export interface InvestmentHolding {
+  id: string;
+  name: string;
+  assetClass: InvestmentAssetClass;
+  provider?: string | null;
+  symbol?: string | null;
+  units?: number | null;
+  currency: string;
+  investedAmount: number;
+  currentValue: number;
+  investedAmountInPaise: number;
+  currentValueInPaise: number;
+  notes?: string | null;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  lastValuationDate?: string;
+}
+
+/** Each holding has its own append-style transaction ledger. */
+export interface InvestmentLedgerEntry {
+  id: string;
+  investmentId: string;
+  investmentName: string;
+  assetClass: InvestmentAssetClass;
+  type: InvestmentActivityType;
+  amount: number;
+  amountInPaise: number;
+  date: string;
+  notes?: string | null;
+  sourceAccountId?: string;
+  sourceAccountName?: string;
+  mainTransactionId?: string;
+  transferId?: string;
+  newValue?: number;
+  newValueInPaise?: number;
+  createdAt?: unknown;
+}
+
+export interface InvestmentPortfolioSnapshot {
+  id: string;
+  date: string;
+  totalValue: number;
+  totalValueInPaise: number;
+  totalInvested: number;
+  totalInvestedInPaise: number;
+  createdAt?: unknown;
 }

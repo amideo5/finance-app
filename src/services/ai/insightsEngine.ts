@@ -13,6 +13,7 @@ export interface InsightTransaction {
   title?: string;
   notes?: string;
   paymentMode?: string;
+  investmentTransferId?: string;
 }
 
 export interface InsightBudget {
@@ -53,7 +54,7 @@ const ALL_CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
 const categoryById = new Map(ALL_CATEGORIES.map((category) => [category.id.toLowerCase(), category]));
 const categoryIdsByName = new Map(ALL_CATEGORIES.map((category) => [category.name.trim().toLowerCase(), category.id]));
 const RECURRING_CATEGORY_IDS = new Set(['housing', 'bills', 'subscriptions', 'insurance', 'loan_emi']);
-const TRANSFER_KINDS = new Set(['self-transfer', 'self_transfer', 'transfer', 'repayment']);
+const TRANSFER_KINDS = new Set(['self-transfer', 'self_transfer', 'transfer', 'repayment', 'investment-transfer']);
 
 function normalise(value: unknown): string {
   return String(value ?? '').trim().toLowerCase();
@@ -73,7 +74,7 @@ function amountInPaise(transaction: InsightTransaction): number {
 
 function isIncluded(transaction: InsightTransaction): boolean {
   const type = normalise(transaction.type);
-  return (type === 'income' || type === 'expense') && !TRANSFER_KINDS.has(normalise(transaction.kind));
+  return (type === 'income' || type === 'expense') && !TRANSFER_KINDS.has(normalise(transaction.kind)) && !transaction.investmentTransferId;
 }
 
 function transactionsOfType(
@@ -244,8 +245,7 @@ export function generateInsights(
       });
     }
   }
-
-  if (currentIncomePaise > 0 && previousIncomePaise > 0 && now.getDate() >= 20) {
+    if (currentIncomePaise > 0 && previousIncomePaise > 0 && now.getDate() >= 20) {
     const change = percentChange(currentIncomePaise, previousIncomePaise);
     if (change !== null && change <= -25) {
       addInsight(insights, {
@@ -402,8 +402,7 @@ export function generateInsights(
       }
     }
   }
-
-  // A peak day can explain a sudden monthly jump without labelling a single purchase as wrong.
+    // A peak day can explain a sudden monthly jump without labelling a single purchase as wrong.
   const spendByDay = new Map<string, number>();
   expenses.forEach((transaction) => {
     const date = validDateKey(transaction.date);

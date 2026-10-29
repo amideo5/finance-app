@@ -5,7 +5,7 @@ import { formatCurrency, formatShortDate } from '@/src/utils/format';
 
 interface TransactionItemProps {
   type: 'income' | 'expense';
-  kind?: 'source' | 'allocation' | 'repayment';
+  kind?: 'source' | 'allocation' | 'repayment' | 'self-transfer' | 'investment-transfer';
   category: string;
   amount: number;
   date: string;
@@ -32,7 +32,7 @@ export default function TransactionItem({
       disabled={!onPress}
     >
       <View style={styles.iconContainer}>
-        <Text style={styles.icon}>{icon || (kind === 'repayment' ? '↔️' : type === 'income' ? '💰' : '💳')}</Text>
+        <Text style={styles.icon}>{icon || (['repayment', 'self-transfer', 'investment-transfer'].includes(kind || '') ? '↔️' : type === 'income' ? '💰' : '💳')}</Text>
       </View>
       <View style={styles.details}>
         <Text style={styles.category}>{kind === 'repayment' ? `${category} · repayment` : kind === 'allocation' ? `${category} · allocation` : kind === 'source' ? `${category} · shared expense source` : category}</Text>
@@ -41,9 +41,9 @@ export default function TransactionItem({
       </View>
       <Text style={[
         styles.amount,
-        kind === 'source' ? styles.sourceAmount : kind === 'repayment' ? styles.repaymentAmount : type === 'income' ? styles.incomeAmount : styles.expenseAmount
+        kind === 'source' ? styles.sourceAmount : (['repayment', 'self-transfer', 'investment-transfer'].includes(kind || '')) ? styles.repaymentAmount : type === 'income' ? styles.incomeAmount : styles.expenseAmount
       ]}>
-        {kind === 'source' ? '↗ ' : kind === 'repayment' ? '↔ ' : type === 'income' ? '+' : '-'}{formatCurrency(amount)}
+        {kind === 'source' ? '↗ ' : ['repayment', 'self-transfer', 'investment-transfer'].includes(kind || '') ? '↔ ' : type === 'income' ? '+' : '-'}{formatCurrency(amount)}
       </Text>
     </TouchableOpacity>
   );

@@ -70,3 +70,20 @@ test('profile switching shows an allocation only in its stored participant profi
   assert.equal(getReportableTransactions([allocation], [], 'default-b').length, 1);
   assert.equal(getReportableTransactions([allocation], [], 'profile-a').length, 0);
 });
+
+
+test('investment-to-bank and bank-to-investment transfers stay visible but do not count as income or expense', () => {
+  const bankToInvestment = transaction({
+    id: 'bank-to-investment', type: 'expense', kind: 'investment-transfer',
+    category: 'Investment Transfer', investmentTransferId: 'transfer-a', investmentTransferDirection: 'in',
+  });
+  const investmentToBank = transaction({
+    id: 'investment-to-bank', type: 'income', kind: 'investment-transfer',
+    category: 'Investment Withdrawal', investmentTransferId: 'transfer-b', investmentTransferDirection: 'out',
+  });
+  const ordinary = transaction({ id: 'ordinary-expense' });
+  assert.deepEqual(
+    getReportableTransactions([bankToInvestment, investmentToBank, ordinary], [], 'profile-a').map((item) => item.id),
+    ['ordinary-expense'],
+  );
+});

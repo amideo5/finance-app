@@ -138,11 +138,13 @@ export default function SelfTransferScreen() {
 
         firestoreTransaction.update(fromRef, {
           balance: fromBalance - amount,
+          balanceInPaise: Math.round((fromBalance - amount) * 100),
           updatedAt: serverTimestamp(),
         });
 
         firestoreTransaction.update(toRef, {
           balance: toBalance + amount,
+          balanceInPaise: Math.round((toBalance + amount) * 100),
           updatedAt: serverTimestamp(),
         });
 
