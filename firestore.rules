@@ -46,20 +46,24 @@ service cloud.firestore {
     // ledger and the daily finance ledger. Both matching rows, the bank balance,
     // and the holding value must move in the same atomic write.
     function validMainInvestmentTransfer(profileId, transactionId) {
-      let direction = request.resource.data.investmentTransferDirection;
-      let investmentPath = /databases/$(database)/documents/profiles/$(profileId)/investments/$(request.resource.data.investmentId);
-      let ledgerPath = /databases/$(database)/documents/profiles/$(profileId)/investments/$(request.resource.data.investmentId)/transactions/$(request.resource.data.investmentLedgerEntryId);
-      let accountPath = /databases/$(database)/documents/profiles/$(profileId)/accounts/$(request.resource.data.accountId);
-      return request.resource.data.kind == 'investment-transfer'
-        && request.resource.data.investmentTransferId == transactionId
+      let direction = request.resource.data.get('investmentTransferDirection', '');
+      let investmentId = request.resource.data.get('investmentId', '__missing__');
+      let ledgerEntryId = request.resource.data.get('investmentLedgerEntryId', '__missing__');
+      let accountId = request.resource.data.get('accountId', '__missing__');
+      let investmentPath = /databases/$(database)/documents/profiles/$(profileId)/investments/$(investmentId);
+      let ledgerPath = /databases/$(database)/documents/profiles/$(profileId)/investments/$(investmentId)/transactions/$(ledgerEntryId);
+      let accountPath = /databases/$(database)/documents/profiles/$(profileId)/accounts/$(accountId);
+
+      return request.resource.data.get('kind', '') == 'investment-transfer'
+        && request.resource.data.get('investmentTransferId', '') == transactionId
         && direction in ['in', 'out']
-        && request.resource.data.investmentId is string
-        && request.resource.data.investmentLedgerEntryId is string
-        && request.resource.data.accountId is string
-        && request.resource.data.amount is number
-        && request.resource.data.amount > 0
-        && request.resource.data.amountInPaise is int
-        && request.resource.data.amountInPaise > 0
+        && investmentId is string
+        && ledgerEntryId is string
+        && accountId is string
+        && request.resource.data.get('amount', 0) is number
+        && request.resource.data.get('amount', 0) > 0
+        && request.resource.data.get('amountInPaise', 0) is int
+        && request.resource.data.get('amountInPaise', 0) > 0
         && exists(investmentPath)
         && exists(accountPath)
         && get(accountPath).data.type == 'bank'
@@ -68,9 +72,12 @@ service cloud.firestore {
         && getAfter(ledgerPath).data.direction == direction
         && getAfter(ledgerPath).data.transferId == transactionId
         && getAfter(ledgerPath).data.mainTransactionId == transactionId
-        && getAfter(ledgerPath).data.investmentId == request.resource.data.investmentId
-        && getAfter(ledgerPath).data.accountId == request.resource.data.accountId
-        && getAfter(ledgerPath).data.amountInPaise == (direction == 'in' ? request.resource.data.amountInPaise : -request.resource.data.amountInPaise)
+        && getAfter(ledgerPath).data.investmentId == investmentId
+        && getAfter(ledgerPath).data.accountId == accountId
+        && getAfter(ledgerPath).data.amountInPaise ==
+          (direction == 'in'
+            ? request.resource.data.amountInPaise
+            : -request.resource.data.amountInPaise)
         && (
           (direction == 'in'
             && request.resource.data.type == 'expense'

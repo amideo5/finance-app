@@ -61,17 +61,17 @@ export default function AddInvestmentScreen() {
       return;
     }
 
-    if (
-      investedInPaise === null ||
-      currentInPaise === null ||
-      (investedInPaise === 0 && currentInPaise === 0)
-    ) {
-      Alert.alert(
-        'Check the amounts',
-        'Enter a valid invested amount or current value greater than zero.',
-      );
-      return;
-    }
+    // if (
+    //   investedInPaise === null ||
+    //   currentInPaise === null ||
+    //   (investedInPaise === 0 && currentInPaise === 0)
+    // ) {
+    //   Alert.alert(
+    //     'Check the amounts',
+    //     'Enter a valid invested amount or current value greater than zero.',
+    //   );
+    //   return;
+    // }
 
     setSaving(true);
 
