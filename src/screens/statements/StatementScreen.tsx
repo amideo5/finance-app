@@ -238,8 +238,7 @@ export default function StatementScreen() {
       .filter(([id]) => Boolean(id))
       .sort((a, b) => a[1].localeCompare(b[1]))
   ), [counterpartyNames]);
-
-  const loadStatement = useCallback(async (isRefresh = false) => {
+    const loadStatement = useCallback(async (isRefresh = false) => {
     if (!currentProfile) {
       requestVersion.current += 1;
       setTransactions([]);
@@ -376,7 +375,7 @@ export default function StatementScreen() {
       }
       if (kindFilter === 'split' && !isSplit) return false;
       if (kindFilter === 'regular' && isSplit) return false;
-      if (kindFilter === 'transfer' && kind !== 'self-transfer') return false;
+      if (kindFilter === 'transfer' && !['self-transfer', 'investment-transfer'].includes(kind)) return false;
       if (kindFilter !== 'all' && kindFilter !== 'split' && kindFilter !== 'regular' && kindFilter !== 'transfer' && kind !== kindFilter) return false;
       if (min !== null && Number.isFinite(min) && amount < min) return false;
       if (max !== null && Number.isFinite(max) && amount > max) return false;
@@ -408,6 +407,7 @@ export default function StatementScreen() {
     let income = 0;
     let expense = 0;
     visibleTransactions.forEach((transaction) => {
+      if (transaction.kind === 'investment-transfer' || transaction.investmentTransferId) return;
       const amount = amountOf(transaction);
       if (transaction.type === 'income') income += amount;
       else if (transaction.type === 'expense') expense += amount;
@@ -451,15 +451,13 @@ export default function StatementScreen() {
     setKindFilter('all');
     setCategoryFilters([]);
     setAccountFilter('all');
-    setSplitFilter('all');
     setCounterpartyFilter('all');
     setSortMode('newest');
     setSearchText('');
     setMinAmount('');
     setMaxAmount('');
   };
-
-  const markedDates = useMemo(() => {
+    const markedDates = useMemo(() => {
     if (!draftStartDate && !draftEndDate) return {};
     const marked: Record<string, any> = {};
     if (draftStartDate && draftEndDate) {
@@ -559,7 +557,8 @@ export default function StatementScreen() {
       const account = transaction.accountId ? accountById.get(transaction.accountId) : null;
       const title = transaction.kind === 'self-transfer' ? transaction.title || 'Transfer' : transaction.category || 'Uncategorized';
       const amount = amountOf(transaction);
-      const amountLabel = `${transaction.type === 'income' ? '+' : transaction.kind === 'self-transfer' || transaction.kind === 'repayment' || transaction.kind === 'source' ? '↔ ' : '−'}${formatCurrency(amount, currency)}`;
+      const isInternalTransfer = transaction.kind === 'self-transfer' || transaction.kind === 'repayment' || transaction.kind === 'source' || transaction.kind === 'investment-transfer' || Boolean(transaction.investmentTransferId);
+      const amountLabel = `${isInternalTransfer ? '↔ ' : transaction.type === 'income' ? '+' : '−'}${formatCurrency(amount, currency)}`;
       return `<tr>
         <td>${htmlEscape(transaction.date || '')}</td><td>${htmlEscape(title)}</td>
         <td>${htmlEscape(transaction.type || '')}</td><td>${htmlEscape(transaction.paymentMode || '—')}</td>
@@ -630,22 +629,22 @@ export default function StatementScreen() {
       Alert.alert('PDF export failed', 'Your statement PDF could not be generated. Please try again.');
     }
   };
-
-  const renderTransaction = ({ item }: { item: StatementTransaction }) => {
+    const renderTransaction = ({ item }: { item: StatementTransaction }) => {
     const amount = amountOf(item);
     const isIncome = item.type === 'income';
     const isRepayment = item.kind === 'repayment';
+    const isInvestmentTransfer = item.kind === 'investment-transfer' || Boolean(item.investmentTransferId);
     const isSource = item.kind === 'source';
     const account = item.accountId ? accountById.get(item.accountId) : null;
     const split = item.splitId ? splitById.get(item.splitId) : sourceSplitByTransaction.get(item.id);
-    const categoryIcon = item.categoryIcon || (isRepayment ? '↔' : isIncome ? '↙' : '↗');
+    const categoryIcon = item.categoryIcon || (isRepayment || isInvestmentTransfer ? '↔' : isIncome ? '↙' : '↗');
     return (
       <TouchableOpacity
         activeOpacity={0.8}
         style={styles.transactionRow}
         onPress={() => router.push(`/transactions/${item.id}`)}
       >
-        <View style={[styles.transactionIcon, isIncome && styles.transactionIconIncome, isRepayment && styles.transactionIconTransfer]}>
+        <View style={[styles.transactionIcon, isIncome && styles.transactionIconIncome, (isRepayment || isInvestmentTransfer) && styles.transactionIconTransfer]}>
           <Text style={styles.transactionEmoji}>{categoryIcon}</Text>
         </View>
         <View style={styles.transactionMain}>
@@ -664,9 +663,9 @@ export default function StatementScreen() {
             styles.transactionAmount,
             isIncome && styles.incomeText,
             (!isIncome && !isRepayment && !isSource) && styles.expenseText,
-            (isRepayment || isSource) && styles.transferText,
+            (isRepayment || isSource || isInvestmentTransfer) && styles.transferText,
           ]}>
-            {isSource ? '↗ ' : isRepayment ? '↔ ' : isIncome ? '+' : '−'}{formatCurrency(amount, currentProfile?.currency || 'INR')}
+            {isSource ? '↗ ' : isRepayment || isInvestmentTransfer ? '↔ ' : isIncome ? '+' : '−'}{formatCurrency(amount, currentProfile?.currency || 'INR')}
           </Text>
           <Text style={styles.transactionKind}>{item.kind === 'allocation' ? 'ALLOCATION' : item.kind === 'source' ? 'SHARED SOURCE' : item.kind === 'repayment' ? 'REPAYMENT' : (item.type || 'TRANSACTION').toUpperCase()}</Text>
         </View>
@@ -877,8 +876,7 @@ export default function StatementScreen() {
       {loadError && transactions.length === 0 ? <View style={styles.emptyState}><Text style={styles.emptyTitle}>Couldn’t load statement</Text><Text style={styles.emptySubtitle}>Pull to refresh and try again.</Text></View> : null}
     </View>
   );
-
-  return (
+    return (
     <View style={styles.container}>
       <FlatList
         data={visibleTransactions}

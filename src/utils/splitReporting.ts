@@ -1,7 +1,7 @@
 import type { FinanceTransaction, SharedExpenseSplit } from '@/types/finance';
 
 /**
- * Removes repayment transfers from consumption/income reports and replaces a
+ * Removes internal transfers from consumption/income reports and replaces a
  * source transaction only when the split's allocation treatment requires it.
  * Allocation transaction rows are persisted atomically with finalization.
  */
@@ -22,7 +22,7 @@ export function getReportableTransactions(
   return transactions.filter((transaction) => {
     if (transaction.profileId && transaction.profileId !== profileId) return false;
     // Transfers appear in transaction history but are not income or consumption.
-    if (transaction.kind === 'repayment') return false;
+    if (transaction.kind === 'repayment' || transaction.kind === 'investment-transfer' || Boolean((transaction as any).investmentTransferId)) return false;
     if (sourceTransactionsToExclude.has(transaction.id)) return false;
     return true;
   }).map((transaction) => transaction.kind === 'allocation'
@@ -51,5 +51,5 @@ export function getExcludedSourceAmountInPaise(splits: SharedExpenseSplit[], pro
 }
 
 export function isReportableIncomeOrExpense(transaction: FinanceTransaction): boolean {
-  return transaction.kind !== 'repayment' && (transaction.type === 'income' || transaction.type === 'expense');
+  return transaction.kind !== 'repayment' && transaction.kind !== 'investment-transfer' && !Boolean((transaction as any).investmentTransferId) && (transaction.type === 'income' || transaction.type === 'expense');
 }
