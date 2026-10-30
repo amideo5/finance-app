@@ -189,6 +189,33 @@ export interface InvestmentHolding {
   createdAt?: unknown;
   updatedAt?: unknown;
   lastValuationDate?: string;
+  startDate?: string;
+  annualInterestRatePercent?: number | null;
+  compoundingFrequency?: 'daily' | 'monthly' | 'quarterly' | 'half_yearly' | 'annually' | null;
+  tenureMonths?: number | null;
+  maturityDate?: string | null;
+  estimatedDailyGrowthInPaise?: number;
+  estimatedDailyGrowth?: number;
+  projectedMaturityValueInPaise?: number | null;
+  projectedMaturityValue?: number | null;
+  valuationMethod?: 'estimated_interest_accrual' | 'market_price' | 'manual';
+  marketDataId?: string | null;
+  marketDataProvider?: 'mfapi' | 'alpha_vantage' | null;
+  lastMarketPrice?: number;
+  lastMarketPriceDate?: string;
+  lastMarketRefreshDate?: string;
+  marketDataLabel?: string;
+  recurringContributionAmount?: number;
+  recurringContributionAmountInPaise?: number;
+  contributionFrequency?: 'weekly' | 'monthly' | 'quarterly' | null;
+  recurringContributionSourceAccountId?: string | null;
+  recurringContributionSourceAccountName?: string | null;
+  recurringContributionEnabled?: boolean;
+  recurringContributionStatus?: string;
+  recurringContributionError?: string | null;
+  nextContributionDate?: string | null;
+  nextContributionIndex?: number;
+  lastContributionDate?: string;
 }
 
 /** Each holding has its own append-style transaction ledger. */
@@ -208,6 +235,13 @@ export interface InvestmentLedgerEntry {
   transferId?: string;
   newValue?: number;
   newValueInPaise?: number;
+  marketPrice?: number;
+  marketPriceDate?: string;
+  marketDataProvider?: 'mfapi' | 'alpha_vantage';
+  valuationRunDate?: string;
+  scheduledContribution?: boolean;
+  scheduledContributionKey?: string;
+  marketDataLabel?: string;
   createdAt?: unknown;
 }
 

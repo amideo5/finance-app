@@ -459,6 +459,15 @@ export default function InvestmentsScreen() {
                   {itemGain >= 0 ? '+' : '−'}
                   {money(Math.abs(itemGain), currency)} unrealized
                 </Text>
+                {['fixed_deposit', 'recurring_deposit'].includes(item.assetClass) && Number(item.annualInterestRatePercent) >= 0 ? (
+                  <Text style={styles.holdingValuation}>
+                    ~{money(Number(item.estimatedDailyGrowthInPaise || 0), currency)}/day estimated interest
+                  </Text>
+                ) : item.lastMarketPriceDate ? (
+                  <Text style={styles.holdingValuation}>Market price as of {item.lastMarketPriceDate}</Text>
+                ) : item.assetClass === 'mutual_fund' || item.assetClass === 'stock' ? (
+                  <Text style={styles.holdingValuation}>Manual value · auto-price not configured</Text>
+                ) : null}
               </View>
 
               <View style={styles.holdingRight}>
@@ -842,6 +851,7 @@ const styles = StyleSheet.create({
   holdingName: { color: colors.text, fontSize: 12, fontWeight: '800' },
   holdingType: { color: colors.textSecondary, fontSize: 9, marginTop: 4 },
   holdingReturn: { fontSize: 9, fontWeight: '700', marginTop: 5 },
+  holdingValuation: { color: colors.textLight, fontSize: 8, marginTop: 4 },
   holdingRight: { flexDirection: 'row', alignItems: 'center', gap: 2 },
   holdingValue: { color: colors.text, fontSize: 11, fontWeight: '800' },
   emptyCard: {

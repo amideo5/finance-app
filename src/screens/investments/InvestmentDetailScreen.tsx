@@ -2,6 +2,7 @@ import Card from '@/src/components/ui/Card';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import { getInvestmentPortfolio } from '@/src/services/firebase/investmentsService';
+import { hasStockMarketApiKey } from '@/src/services/marketData/investmentPrices';
 import { formatCurrency, formatDate } from '@/src/utils/format';
 import {
   useFocusEffect,
@@ -17,6 +18,7 @@ import {
   ChevronRight,
   History,
   Plus,
+  Settings2,
   TrendingUp,
   Wallet,
 } from 'lucide-react-native';
@@ -240,6 +242,127 @@ export default function InvestmentDetailScreen() {
             </Text>
           ) : null}
         </View>
+
+        {['fixed_deposit', 'recurring_deposit'].includes(investment.assetClass) && Number.isFinite(Number(investment.annualInterestRatePercent)) ? (
+          <Card style={styles.valuationCard}>
+            <View style={styles.valuationHeader}>
+              <View style={styles.valuationIcon}>
+                <TrendingUp size={18} color={colors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.valuationTitle}>Estimated interest accrual</Text>
+                <Text style={styles.valuationSub}>Calculated from dated cash flows · no daily ledger spam</Text>
+              </View>
+            </View>
+            <View style={styles.estimatedGrowthRow}>
+              <View>
+                <Text style={styles.valuationMetricLabel}>Estimated growth today</Text>
+                <Text style={styles.estimatedGrowthValue}>+{formatMoneyPaise(Number(investment.estimatedDailyGrowthInPaise || 0), currency)}</Text>
+              </View>
+              <View style={styles.rateBadge}>
+                <Text style={styles.rateBadgeValue}>{Number(investment.annualInterestRatePercent).toFixed(2)}%</Text>
+                <Text style={styles.rateBadgeLabel}>p.a.</Text>
+              </View>
+            </View>
+            <View style={styles.termMetaRow}>
+              <View style={styles.termMetaItem}>
+                <Text style={styles.valuationMetricLabel}>Started</Text>
+                <Text style={styles.termMetaValue}>{investment.startDate || 'Not set'}</Text>
+              </View>
+              <View style={styles.termMetaItem}>
+                <Text style={styles.valuationMetricLabel}>Compounding</Text>
+                <Text style={styles.termMetaValue}>{String(investment.compoundingFrequency || 'quarterly').replace('_', '-')}</Text>
+              </View>
+              <View style={styles.termMetaItem}>
+                <Text style={styles.valuationMetricLabel}>Maturity</Text>
+                <Text style={styles.termMetaValue}>{investment.maturityDate || 'Open-ended'}</Text>
+              </View>
+            </View>
+            {investment.projectedMaturityValueInPaise !== null && investment.projectedMaturityValueInPaise !== undefined ? (
+              <View style={styles.projectedMaturityBox}>
+                <Text style={styles.valuationMetricLabel}>Projected maturity value</Text>
+                <Text style={styles.projectedMaturityValue}>{formatMoneyPaise(Number(investment.projectedMaturityValueInPaise || 0), currency)}</Text>
+                <Text style={styles.valuationSub}>Includes the current rate and, for RD, future configured installments through maturity.</Text>
+              </View>
+            ) : null}
+            {investment.assetClass === 'recurring_deposit' ? (
+              <View style={styles.rdScheduleBox}>
+                <Text style={styles.rdScheduleTitle}>Recurring installment</Text>
+                <Text style={styles.rdScheduleValue}>
+                  {formatMoneyPaise(Number(investment.recurringContributionAmountInPaise || 0), currency)} · {investment.contributionFrequency || 'monthly'}
+                </Text>
+                <Text style={styles.rdScheduleMeta}>
+                  {investment.recurringContributionEnabled
+                    ? `Next due: ${investment.nextContributionDate || 'after maturity'} · Source: ${investment.recurringContributionSourceAccountName || (investment.recurringContributionSourceAccountId ? 'Linked bank account' : 'No source account')}`
+                    : `Schedule: ${investment.recurringContributionStatus || 'not configured'}`}
+                </Text>
+                {investment.recurringContributionError ? (
+                  <Text style={styles.valuationError}>{investment.recurringContributionError}</Text>
+                ) : null}
+                <Text style={styles.rdScheduleMeta}>Due installments are caught up when the app opens. A linked account affects only the tracked app balance; it is not an actual bank mandate.</Text>
+              </View>
+            ) : null}
+            <Text style={styles.calculationDisclaimer}>Estimate only. Your bank may use different day-count, compounding, rounding, tax and premature-closure rules.</Text>
+          </Card>
+        ) : null}
+
+        {['mutual_fund', 'stock'].includes(investment.assetClass) ? (
+          <Card style={styles.valuationCard}>
+            <View style={styles.valuationHeader}>
+              <View style={[styles.valuationIcon, { backgroundColor: '#E1F8EC' }]}>
+                <TrendingUp size={18} color="#13845A" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.valuationTitle}>Market-price valuation</Text>
+                <Text style={styles.valuationSub}>Updates daily when you open the portfolio, if a provider is configured</Text>
+              </View>
+            </View>
+            {investment.lastMarketPriceDate ? (
+              <>
+                <View style={styles.termMetaRow}>
+                  <View style={styles.termMetaItem}>
+                    <Text style={styles.valuationMetricLabel}>Latest unit price</Text>
+                    <Text style={styles.termMetaValue}>{formatCurrency(Number(investment.lastMarketPrice || 0), currency)}</Text>
+                  </View>
+                  <View style={styles.termMetaItem}>
+                    <Text style={styles.valuationMetricLabel}>Price date</Text>
+                    <Text style={styles.termMetaValue}>{investment.lastMarketPriceDate}</Text>
+                  </View>
+                  <View style={styles.termMetaItem}>
+                    <Text style={styles.valuationMetricLabel}>Units</Text>
+                    <Text style={styles.termMetaValue}>{Number(investment.units || 0).toLocaleString('en-IN')}</Text>
+                  </View>
+                </View>
+                <Text style={styles.valuationSub}>{investment.marketDataLabel || 'Latest available provider quote'} · value is price × units</Text>
+              </>
+            ) : (
+              <Text style={styles.marketWarning}>
+                {investment.assetClass === 'mutual_fund'
+                  ? (!investment.marketDataId || !Number(investment.units)
+                    ? 'Add an MFAPI scheme code and units to enable automatic NAV valuation. Until then, current value remains manual.'
+                    : 'No NAV has been fetched yet. Check the scheme code and network connection.')
+                  : (!investment.marketDataId || !Number(investment.units)
+                    ? 'Add the exchange ticker and share quantity to enable automatic valuation.'
+                    : (!hasStockMarketApiKey()
+                      ? 'Stock quotes require EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY in your local environment. Until it is configured, current value remains manual.'
+                      : 'No stock quote has been fetched yet. Check the ticker and provider quota.'))}
+              </Text>
+            )}
+          </Card>
+        ) : null}
+
+        <TouchableOpacity
+          style={styles.configureGrowth}
+          onPress={() => router.push(`/investments/${investment.id}/settings`)}
+          activeOpacity={0.85}
+        >
+          <View style={styles.configureGrowthIcon}><Settings2 size={17} color={colors.primary} /></View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.configureGrowthTitle}>Configure growth</Text>
+            <Text style={styles.configureGrowthSub}>Rates, schedule, NAV code or stock ticker</Text>
+          </View>
+          <ChevronRight size={17} color={colors.primary} />
+        </TouchableOpacity>
 
         <Text style={styles.sectionTitle}>Quick actions</Text>
 
@@ -537,6 +660,33 @@ const styles = StyleSheet.create({
   metricLabel: { color: colors.textSecondary, fontSize: 10, marginBottom: 6 },
   metricValue: { color: colors.text, fontSize: 13, fontWeight: '800' },
   valuationText: { color: colors.textLight, fontSize: 9, marginTop: 13 },
+  valuationCard: { marginBottom: 22, gap: 12 },
+  valuationHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  valuationIcon: { width: 38, height: 38, borderRadius: 13, backgroundColor: '#EAE9FF', alignItems: 'center', justifyContent: 'center' },
+  valuationTitle: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  valuationSub: { color: colors.textSecondary, fontSize: 9, lineHeight: 14, marginTop: 4 },
+  estimatedGrowthRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  valuationMetricLabel: { color: colors.textSecondary, fontSize: 9, marginBottom: 5 },
+  estimatedGrowthValue: { color: colors.success, fontSize: 22, fontWeight: '800' },
+  projectedMaturityBox: { backgroundColor: '#E1F8EC', borderRadius: 13, padding: 12, marginTop: 3 },
+  projectedMaturityValue: { color: '#13845A', fontSize: 19, fontWeight: '800' },
+  rateBadge: { borderRadius: 12, backgroundColor: '#EAE9FF', paddingHorizontal: 13, paddingVertical: 9, alignItems: 'center' },
+  rateBadgeValue: { color: colors.primary, fontSize: 15, fontWeight: '800' },
+  rateBadgeLabel: { color: colors.primary, fontSize: 8, fontWeight: '700', marginTop: 2 },
+  termMetaRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  termMetaItem: { flex: 1, backgroundColor: colors.background, borderRadius: 11, padding: 9, minWidth: 0 },
+  termMetaValue: { color: colors.text, fontSize: 10, fontWeight: '800' },
+  rdScheduleBox: { backgroundColor: colors.background, borderRadius: 13, padding: 12, gap: 5 },
+  rdScheduleTitle: { color: colors.text, fontSize: 11, fontWeight: '800' },
+  rdScheduleValue: { color: colors.primary, fontSize: 13, fontWeight: '800' },
+  rdScheduleMeta: { color: colors.textSecondary, fontSize: 9, lineHeight: 14 },
+  valuationError: { color: colors.danger, fontSize: 10, lineHeight: 14, fontWeight: '700' },
+  calculationDisclaimer: { color: colors.textLight, fontSize: 8, lineHeight: 13 },
+  marketWarning: { color: colors.textSecondary, fontSize: 10, lineHeight: 16 },
+  configureGrowth: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.card, borderRadius: 15, borderWidth: 1, borderColor: colors.border, padding: 12, marginTop: -8, marginBottom: 22 },
+  configureGrowthIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: '#EAE9FF', alignItems: 'center', justifyContent: 'center' },
+  configureGrowthTitle: { color: colors.text, fontSize: 11, fontWeight: '800' },
+  configureGrowthSub: { color: colors.textSecondary, fontSize: 9, marginTop: 4 },
   sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '800' },
   actionRow: {
     flexDirection: 'row',
