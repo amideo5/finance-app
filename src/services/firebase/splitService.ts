@@ -106,8 +106,16 @@ export async function createSplit(payload: CreateSplitPayload): Promise<string> 
 
 export async function getUserSplits(userId: string): Promise<SharedExpenseSplit[]> {
   const [participantSnapshot, creatorSnapshot] = await Promise.all([
-    getDocs(query(collection(db, 'splits'), where('participantIds', 'array-contains', userId))),
-    getDocs(query(collection(db, 'splits'), where('createdBy', '==', userId))),
+    getDocs(query(collection(db, 'splits'), where('participantIds', 'array-contains', userId)))
+      .catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Firestore read failed at splits (participantIds): ${detail}`, { cause: error });
+      }),
+    getDocs(query(collection(db, 'splits'), where('createdBy', '==', userId)))
+      .catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Firestore read failed at splits (createdBy): ${detail}`, { cause: error });
+      }),
   ]);
   const unique = new Map<string, SharedExpenseSplit>();
   for (const snapshot of [participantSnapshot, creatorSnapshot]) {
@@ -129,27 +137,67 @@ export async function getSplit(splitId: string): Promise<SharedExpenseSplit | nu
 }
 
 export async function getSplitSettlements(splitId: string): Promise<SplitSettlement[]> {
-  const snapshot = await getDocs(collection(db, 'splits', splitId, 'settlements'));
-  return snapshot.docs.map((settlementDoc) => ({ id: settlementDoc.id, ...settlementDoc.data() } as SplitSettlement));
+  try {
+    const snapshot = await getDocs(collection(db, 'splits', splitId, 'settlements'));
+    return snapshot.docs.map((settlementDoc) => ({ id: settlementDoc.id, ...settlementDoc.data() } as SplitSettlement));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Firestore read failed at splits/${splitId}/settlements: ${detail}`, { cause: error });
+  }
 }
 
 export async function getFriendSettlements(userId: string): Promise<FriendSettlement[]> {
-  const snapshot = await getDocs(
-    query(collection(db, 'friendSettlements'), where('participantIds', 'array-contains', userId)),
-  );
-  return snapshot.docs.map((settlementDoc) => ({ id: settlementDoc.id, ...settlementDoc.data() } as FriendSettlement));
+  // Keep client reads scoped to settlements where this user is a direct party.
+  // Clique-wide settlement effects are already calculated by the trusted
+  // get-network-net-balances Edge Function, which returns only this caller's
+  // split status IDs. The client does not need to read other members' requests.
+  try {
+    const snapshot = await getDocs(
+      query(collection(db, 'friendSettlements'), where('participantIds', 'array-contains', userId)),
+    );
+    return snapshot.docs.map((settlementDoc) => ({ id: settlementDoc.id, ...settlementDoc.data() } as FriendSettlement));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Firestore read failed at friendSettlements (participantIds): ${detail}`, { cause: error });
+  }
+}
+
+export async function getUserSplitLedger(userId: string): Promise<{
+  splits: SharedExpenseSplit[];
+  splitSettlements: SplitSettlement[];
+  friendSettlements: FriendSettlement[];
+  friendNetBalances: Awaited<ReturnType<typeof getFriendNetBalances>>;
+}> {
+  const [splits, friendSettlements, friendNetBalances] = await Promise.all([
+    getUserSplits(userId),
+    getFriendSettlements(userId),
+    getFriendNetBalances(userId),
+  ]);
+  const splitSettlementGroups = await Promise.all(splits.map((split) => getSplitSettlements(split.id)));
+  const splitSettlements = splitSettlementGroups.flat();
+  return {
+    splits: splits.map((split) => ({
+      ...split,
+      settlementDisplayStatus: friendNetBalances.splitSettlementStatuses[split.id] ?? split.status,
+    })),
+    splitSettlements,
+    friendSettlements,
+    friendNetBalances,
+  };
 }
 
 export async function getFriendNetBalances(userId: string): Promise<{
   balances: Record<string, number>;
   suggestions: SettlementSuggestion[];
   unresolvedObligations: UnresolvedFriendObligation[];
+  splitSettlementStatuses: Record<string, 'settlement_started' | 'settled'>;
   algorithmVersion: number;
 }> {
   const result = await callSupabaseSplitFunction<Record<string, never>, {
     balances: Record<string, number>;
     suggestions: SettlementSuggestion[];
     unresolvedObligations: UnresolvedFriendObligation[];
+    splitSettlementStatuses: Record<string, 'settlement_started' | 'settled'>;
     algorithmVersion: number;
   }>('getNetworkNetBalances', {});
   if (
@@ -157,9 +205,11 @@ export async function getFriendNetBalances(userId: string): Promise<{
     || typeof result.balances[userId] !== 'number'
     || !Array.isArray(result.suggestions)
     || !Array.isArray(result.unresolvedObligations)
-    || result.algorithmVersion !== 3
+    || !result.splitSettlementStatuses
+    || typeof result.splitSettlementStatuses !== 'object'
+    || result.algorithmVersion !== 4
   ) {
-    throw new Error('The split service is outdated or returned incomplete settlement data. Deploy the updated supabase/functions/split-health Edge Function (algorithm version 3) before using friend settlement suggestions.');
+    throw new Error('The split service is outdated or returned incomplete settlement data. Deploy the updated supabase/functions/split-health Edge Function (algorithm version 4) before using friend settlement suggestions.');
   }
   return result;
 }

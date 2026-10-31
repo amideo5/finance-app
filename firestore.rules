@@ -349,8 +349,9 @@ service cloud.firestore {
     }
 
     match /friendSettlements/{settlementId} {
-      // Client reads only requests in which the signed-in user is a participant.
-      // All writes are performed by the authenticated Supabase Edge Function.
+      // Client reads only requests in which the signed-in user is a direct party.
+      // Clique-wide effects are calculated by the trusted Edge Function, so
+      // other members do not need direct access to counterparties' payment rows.
       allow read: if signedIn() && request.auth.uid in resource.data.participantIds;
       allow create, update, delete: if false;
     }
