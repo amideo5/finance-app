@@ -10,6 +10,7 @@ import {
   validateCustomShares,
 } from '../src/utils/splitUtils.ts';
 import type { SharedExpenseSplit, SplitSettlement } from '../types/finance.ts';
+import { deriveNetSettlementSplitStatuses, type LedgerFriendSettlement, type SplitLedgerObligation } from '../supabase/functions/_shared/settlement.ts';
 
 function split(overrides: Partial<SharedExpenseSplit> = {}): SharedExpenseSplit {
   return {
@@ -136,4 +137,82 @@ test('friend-only matching emits only directly accepted friend pairs', () => {
     { fromUserId: 'A', toUserId: 'B', amountInPaise: 6000 },
     { fromUserId: 'A', toUserId: 'C', amountInPaise: 4000 },
   ]);
+});
+
+
+test('clique-net settlements mark associated splits started until the whole group is settled', () => {
+  // Includes B-C's obligation even when the signed-in user A cannot read that split.
+  const obligations: SplitLedgerObligation[] = [
+    { splitId: 'split-ba', fromUserId: 'B', toUserId: 'A', amountInPaise: 1000, acceptedAmountInPaise: 0 },
+    { splitId: 'split-cb', fromUserId: 'C', toUserId: 'B', amountInPaise: 1000, acceptedAmountInPaise: 0 },
+  ];
+  const cliquePayment: LedgerFriendSettlement = {
+    id: 'clique-payment', fromUserId: 'C', toUserId: 'A', amountInPaise: 500,
+    status: 'accepted', idempotencyKey: 'clique-payment-key', settlementMode: 'clique_net',
+    settlementGroupUserIds: ['A', 'B', 'C'],
+  };
+
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, [cliquePayment]), {
+    'split-ba': 'settlement_started', 'split-cb': 'settlement_started',
+  });
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, [{ ...cliquePayment, amountInPaise: 1000 }]), {
+    'split-ba': 'settled', 'split-cb': 'settled',
+  });
+});
+
+test('pending clique-net proposal does not start a split settlement', () => {
+  const obligations: SplitLedgerObligation[] = [
+    { splitId: 'split-ba', fromUserId: 'B', toUserId: 'A', amountInPaise: 1000, acceptedAmountInPaise: 0 },
+  ];
+  const pendingPayment: LedgerFriendSettlement = {
+    id: 'pending-clique-payment', fromUserId: 'B', toUserId: 'A', amountInPaise: 500,
+    status: 'pending', idempotencyKey: 'pending-clique-key', settlementMode: 'clique_net',
+    settlementGroupUserIds: ['A', 'B', 'C'],
+  };
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, [pendingPayment]), {});
+});
+
+test('bilateral net settlement marks a two-person split settled only when its pair balance is zero', () => {
+  const obligations: SplitLedgerObligation[] = [
+    { splitId: 'split-ba', fromUserId: 'B', toUserId: 'A', amountInPaise: 1000, acceptedAmountInPaise: 0 },
+  ];
+  const payment: LedgerFriendSettlement = {
+    id: 'bilateral-payment', fromUserId: 'B', toUserId: 'A', amountInPaise: 400,
+    status: 'accepted', idempotencyKey: 'bilateral-payment-key', settlementMode: 'bilateral',
+  };
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, [payment]), { 'split-ba': 'settlement_started' });
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, [{ ...payment, amountInPaise: 1000 }]), { 'split-ba': 'settled' });
+});
+
+test('a net-settled pair does not mark a multi-party split settled while another obligation remains', () => {
+  const obligations: SplitLedgerObligation[] = [
+    { splitId: 'split-multi', fromUserId: 'B', toUserId: 'A', amountInPaise: 500, acceptedAmountInPaise: 0 },
+    { splitId: 'split-multi', fromUserId: 'C', toUserId: 'A', amountInPaise: 500, acceptedAmountInPaise: 0 },
+  ];
+  const payment: LedgerFriendSettlement = {
+    id: 'bilateral-payment', fromUserId: 'B', toUserId: 'A', amountInPaise: 500,
+    status: 'accepted', idempotencyKey: 'bilateral-payment-key', settlementMode: 'bilateral',
+  };
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, [payment]), { 'split-multi': 'settlement_started' });
+});
+
+test('clique status includes accepted legacy bilateral transfers within the group', () => {
+  const obligations: SplitLedgerObligation[] = [
+    { splitId: 'split-ba', fromUserId: 'B', toUserId: 'A', amountInPaise: 1000, acceptedAmountInPaise: 0 },
+    { splitId: 'split-cb', fromUserId: 'C', toUserId: 'B', amountInPaise: 1000, acceptedAmountInPaise: 0 },
+  ];
+  const settlements: LedgerFriendSettlement[] = [
+    {
+      id: 'clique-payment', fromUserId: 'C', toUserId: 'A', amountInPaise: 500,
+      status: 'accepted', idempotencyKey: 'clique-payment-key', settlementMode: 'clique_net',
+      settlementGroupUserIds: ['A', 'B', 'C'],
+    },
+    {
+      id: 'legacy-bilateral-payment', fromUserId: 'C', toUserId: 'A', amountInPaise: 500,
+      status: 'accepted', idempotencyKey: 'legacy-payment-key', settlementMode: 'bilateral',
+    },
+  ];
+  assert.deepEqual(deriveNetSettlementSplitStatuses(obligations, settlements), {
+    'split-ba': 'settled', 'split-cb': 'settled',
+  });
 });

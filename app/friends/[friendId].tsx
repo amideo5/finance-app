@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity } from 'react-native';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { getUserSplits } from '@/src/services/firebase/splitService';
+import { getUserSplitLedger } from '@/src/services/firebase/splitService';
 import type { SharedExpenseSplit } from '@/types/finance';
 
 export default function FriendLedger() {
@@ -18,7 +18,7 @@ export default function FriendLedger() {
     if (!currentProfile?.userId || !friendId) return;
     setLoading(true);
     try {
-      const rows = await getUserSplits(currentProfile.userId);
+      const { splits: rows } = await getUserSplitLedger(currentProfile.userId);
       setSplits(rows.filter((split) => split.participantIds.includes(friendId)
         || split.createdBy === friendId
         || split.paidByUserId === friendId));
@@ -39,11 +39,11 @@ export default function FriendLedger() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <TouchableOpacity onPress={() => router.back()}><Text style={styles.back}>← Back</Text></TouchableOpacity>
       <Text style={styles.title}>Shared expenses</Text>
-      <Text style={styles.subtitle}>Repayments are requested and approved within each split.</Text>
+      <Text style={styles.subtitle}>Split statuses reflect direct repayments and accepted friend-level net settlements.</Text>
       {loading ? <Text style={styles.muted}>Loading…</Text> : splits.length === 0 ? <Text style={styles.muted}>No shared expenses with this friend.</Text> : splits.map((split) => (
         <TouchableOpacity key={split.id} style={styles.card} onPress={() => router.push(`/splits/${split.id}`)}>
           <Text style={styles.name}>{split.title || 'Shared expense'}</Text>
-          <Text style={styles.muted}>{split.status.replaceAll('_', ' ')}</Text>
+          <Text style={styles.muted}>{(split.settlementDisplayStatus || split.status).replaceAll('_', ' ')}</Text>
           <Text style={styles.amount}>₹{(split.totalAmountInPaise / 100).toFixed(2)}</Text>
         </TouchableOpacity>
       ))}

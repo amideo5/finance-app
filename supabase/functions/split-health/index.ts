@@ -1,6 +1,6 @@
 
 import { importPKCS8, importX509, SignJWT, jwtVerify } from "npm:jose@6";
-import { buildMutualFriendshipKeys, calculateFriendshipAwarePlan, deduplicateFriendSettlementRecords, getCompleteFriendshipCliqueForPair, getCliqueSettlementCapacity } from "../_shared/settlement.ts";
+import { buildMutualFriendshipKeys, calculateFriendshipAwarePlan, deduplicateFriendSettlementRecords, deriveNetSettlementSplitStatuses, getCompleteFriendshipCliqueForPair, getCliqueSettlementCapacity } from "../_shared/settlement.ts";
 
 const projectId = Deno.env.get("FIREBASE_PROJECT_ID");
 const serviceAccountB64 = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64");
@@ -522,8 +522,8 @@ function createObligations(
 // -----------------------------------------------------------------------------
 // Friend-level net settlements
 // Collection: friendSettlements/{settlementId}
-// These payments affect the combined balance between two friends. They do not
-// mark individual shared-expense splits as paid.
+// These payments affect friend-pair or clique balances. Clients derive a display-only
+// split status from accepted rows; the source split obligations are not rewritten.
 // -----------------------------------------------------------------------------
 
 type FriendSettlementStatus =
@@ -1071,7 +1071,7 @@ async function getNetworkNetBalancesForUser(
     fromUserId: string; toUserId: string; amountInPaise: number;
     reason: "not_currently_mutual_friends";
   }>;
-  algorithmVersion: 3;
+  algorithmVersion: 4;
 }> {
   const transactionId = await beginFirestoreTransaction();
   try {
@@ -1087,12 +1087,59 @@ async function getNetworkNetBalancesForUser(
       queryEntireCollectionInTransaction("friendSettlements", transactionId),
     ]);
     const plan = simplifyFriendPairObligations(splitDocs, friendSettlementDocs, friendLedger.friendKeys, uid);
+    // Derive source-split display statuses on the trusted backend using the full
+    // ledger. A client only sees splits it participates in, which is insufficient
+    // to determine whether the rest of a clique has completed its net payments.
+    const displayObligations = splitDocs.flatMap((doc) => {
+      const split = fsDocData(doc);
+      if (split.status === "cancelled") return [];
+      const splitId = doc.name?.split("/").at(-1) ?? "";
+      const rows = Array.isArray(split.obligations)
+        ? split.obligations as Array<Record<string, unknown>> : [];
+      return rows.map((obligation) => ({
+        splitId,
+        fromUserId: typeof obligation.fromUserId === "string" ? obligation.fromUserId : "",
+        toUserId: typeof obligation.toUserId === "string" ? obligation.toUserId : "",
+        amountInPaise: assertPaise(obligation.amountInPaise, "Split obligation", true),
+        acceptedAmountInPaise: assertPaise(obligation.acceptedAmountInPaise ?? 0, "Accepted split repayment", true),
+      }));
+    });
+    const displayFriendSettlements = friendSettlementDocs.map((doc) => {
+      const item = fsDocData(doc);
+      return {
+        id: doc.name?.split("/").at(-1) ?? "",
+        fromUserId: String(item.fromUserId ?? ""),
+        toUserId: String(item.toUserId ?? ""),
+        amountInPaise: assertPaise(item.amountInPaise, "Friend settlement amount", true),
+        status: String(item.status ?? ""),
+        idempotencyKey: typeof item.idempotencyKey === "string" ? item.idempotencyKey : undefined,
+        settlementMode: typeof item.settlementMode === "string" ? item.settlementMode : undefined,
+        settlementGroupUserIds: Array.isArray(item.settlementGroupUserIds)
+          ? item.settlementGroupUserIds.filter((id): id is string => typeof id === "string")
+          : undefined,
+      };
+    });
+    const allSplitSettlementStatuses = deriveNetSettlementSplitStatuses(displayObligations, displayFriendSettlements);
+    // The response exposes status IDs only for splits this caller can already
+    // read as a participant/creator. Other group members' obligations are used
+    // for the aggregate calculation but their split metadata stays private.
+    const visibleSplitIds = new Set(splitDocs.flatMap((doc) => {
+      const split = fsDocData(doc);
+      const participantIds = Array.isArray(split.participantIds) ? split.participantIds : [];
+      return participantIds.includes(uid) || split.createdBy === uid
+        ? [doc.name?.split("/").at(-1) ?? ""]
+        : [];
+    }));
+    const splitSettlementStatuses = Object.fromEntries(
+      Object.entries(allSplitSettlementStatuses).filter(([splitId]) => visibleSplitIds.has(splitId)),
+    );
     await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) });
     return {
       balances: { [uid]: userBalance },
       suggestions: plan.suggestions,
       unresolvedObligations: plan.unresolvedObligations,
-      algorithmVersion: 3,
+      splitSettlementStatuses,
+      algorithmVersion: 4,
     };
   } catch (error) {
     try { await firestoreRequest(":rollback", { method: "POST", body: JSON.stringify({ transaction: transactionId }) }); } catch {}
@@ -2283,8 +2330,36 @@ async function cancelSharedExpense(uid: string, data: Record<string, unknown>) {
     if (Array.isArray(split.obligations) && split.obligations.some((o: Record<string, unknown>) => Number(o.pendingAmountInPaise ?? 0) > 0)) {
       throw new Error("Cancel pending repayment requests before cancelling the split");
     }
-    // Friend-level settlements are global transfers, not assigned to a split.
-    // Accepted transfers remain in the ledger if this split is cancelled; any
+    const acceptedFriendSettlementDocs = await queryEntireCollectionInTransaction("friendSettlements", tx);
+    const splitObligations = Array.isArray(split.obligations)
+      ? split.obligations as Array<Record<string, unknown>>
+      : [];
+    const hasAcceptedNetSettlement = acceptedFriendSettlementDocs.some((doc) => {
+      const item = fsDocData(doc);
+      if (item.status !== "accepted") return false;
+      const fromUserId = typeof item.fromUserId === "string" ? item.fromUserId : "";
+      const toUserId = typeof item.toUserId === "string" ? item.toUserId : "";
+      if (!fromUserId || !toUserId) return false;
+      if (item.settlementMode === "clique_net") {
+        const group = Array.isArray(item.settlementGroupUserIds)
+          ? item.settlementGroupUserIds.filter((id): id is string => typeof id === "string")
+          : [];
+        const members = new Set(group);
+        return splitObligations.some((obligation) =>
+          members.has(String(obligation.fromUserId ?? ""))
+          && members.has(String(obligation.toUserId ?? "")),
+        );
+      }
+      return splitObligations.some((obligation) =>
+        (obligation.fromUserId === fromUserId && obligation.toUserId === toUserId)
+        || (obligation.fromUserId === toUserId && obligation.toUserId === fromUserId),
+      );
+    });
+    if (hasAcceptedNetSettlement) {
+      throw new Error("This split is already associated with an accepted friend-level net settlement and cannot be cancelled while that settlement is being reconciled.");
+    }
+    // Friend-level settlements are global transfers, not written into this split.
+    // Accepted transfers unrelated to this split remain in the network ledger; a
     // pending friend request must pass a fresh balance check before acceptance.
     const now = new Date().toISOString();
     const writes: unknown[] = [{

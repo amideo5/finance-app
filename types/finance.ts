@@ -3,6 +3,7 @@ export type SplitTransactionKind = 'source' | 'allocation' | 'repayment';
 
 export type SplitType = 'equal' | 'custom';
 export type SplitStatus = 'pending_settlement' | 'partially_settled' | 'finalizing' | 'settled' | 'cancelled';
+export type SplitDisplayStatus = SplitStatus | 'settlement_started';
 export type SettlementStatus = 'pending' | 'accepted' | 'rejected' | 'cancelled';
 
 export interface SplitParticipant {
@@ -36,6 +37,8 @@ export interface SharedExpenseSplit {
   allocationProfileIds?: Record<string, string>;
   allocationTransactionIds?: Record<string, string>;
   status: SplitStatus;
+  /** UI-only status derived from accepted friend-level net settlements; never persist this field. */
+  settlementDisplayStatus?: SplitDisplayStatus;
   finalizationStatus: 'not_started' | 'processing' | 'complete' | 'failed';
   sourceDate: string;
   sourceCategory: string;
