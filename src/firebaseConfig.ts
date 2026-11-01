@@ -1,13 +1,21 @@
+
 // Firebase v9+ Modular SDK for Expo
 import { initializeApp } from "firebase/app";
-import { connectAuthEmulator, getAuth } from "firebase/auth";
-import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
-import { connectFunctionsEmulator, getFunctions } from "firebase/functions";
+import {
+  connectAuthEmulator,
+  initializeAuth,
+  getReactNativePersistence
+} from "firebase/auth";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  connectFirestoreEmulator,
+  getFirestore
+} from "firebase/firestore";
+import {
+  connectFunctionsEmulator,
+  getFunctions
+} from "firebase/functions";
 
-// -----------------------------------------
-// REPLACE THESE WITH YOUR FIREBASE CREDENTIALS
-// (from: Firebase Console → Project Settings → SDK setup)
-// -----------------------------------------
 const firebaseConfig = {
   apiKey: "AIzaSyCeAf0pxyeO0gLlgkzL7IfU-3rRj0s9Fhw",
   authDomain: "f-app-041225.firebaseapp.com",
@@ -21,16 +29,24 @@ const firebaseConfig = {
 // Initialize Firebase app
 const app = initializeApp(firebaseConfig);
 
-// Initialize Auth
-export const auth = getAuth(app);
+// Initialize Auth with persistent storage
+export const auth = initializeAuth(app, {
+  persistence: getReactNativePersistence(AsyncStorage)
+});
 
 // Initialize Firestore
 export const db = getFirestore(app);
 export const functions = getFunctions(app);
 
+// Configure Firebase emulators
 if (process.env.EXPO_PUBLIC_USE_FIREBASE_EMULATORS === "true") {
-  const emulatorHost = process.env.EXPO_PUBLIC_FIREBASE_EMULATOR_HOST || "127.0.0.1";
-  connectAuthEmulator(auth, `http://${emulatorHost}:9099`, { disableWarnings: true });
+  const emulatorHost =
+    process.env.EXPO_PUBLIC_FIREBASE_EMULATOR_HOST || "127.0.0.1";
+
+  connectAuthEmulator(auth, `http://${emulatorHost}:9099`, {
+    disableWarnings: true
+  });
+
   connectFirestoreEmulator(db, emulatorHost, 8080);
   connectFunctionsEmulator(functions, emulatorHost, 5001);
 }

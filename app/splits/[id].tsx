@@ -44,7 +44,7 @@ export default function SplitDetail() {
     } finally {
       setLoading(false);
     }
-  }, [splitId, currentProfile?.userId]);
+  }, [splitId, currentProfile]);
 
   useEffect(() => {
     // Async Firestore refresh is applied after the effect returns.
