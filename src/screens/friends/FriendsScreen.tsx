@@ -13,10 +13,8 @@ import {
 import {
   acceptFriendSettlement,
   cancelFriendSettlement,
-  getFriendNetBalances,
   getFriendSettlements,
-  getSplitSettlements,
-  getUserSplits,
+  getUserSplitLedger,
   rejectFriendSettlement,
   requestFriendSettlement,
 } from '@/src/services/firebase/splitService';
@@ -85,12 +83,8 @@ export default function FriendsScreen() {
     setOutstandingTotalPaise(0);
     setPendingSplitRepaymentCount(0);
     try {
-      const userSplits = await getUserSplits(userId);
-      const splitSettlementRows = (await Promise.all(
-        userSplits.map((split) => getSplitSettlements(split.id)),
-      )).flat();
-      const friendSettlementRows = await getFriendSettlements(userId);
-      const netLedger = await getFriendNetBalances(userId);
+      const splitLedger = await getUserSplitLedger(userId);
+      const { splits: userSplits, splitSettlements: splitSettlementRows, friendSettlements: friendSettlementRows, friendNetBalances: netLedger } = splitLedger;
 
       setSplits(userSplits);
       setFriendSettlements(friendSettlementRows);
@@ -437,7 +431,7 @@ export default function FriendsScreen() {
           <Text style={styles.splitNetLabel}>Net balance</Text>
           <Text style={styles.splitNetAmount}>{netPaise < 0 ? '−' : netPaise > 0 ? '+' : ''}₹{(Math.abs(netPaise) / 100).toFixed(2)}</Text>
           <Text style={styles.splitNetCaption}>{netPaise > 0 ? 'You are owed more than you owe' : netPaise < 0 ? 'You owe more than you are owed' : 'Your suggested balances are even'}</Text>
-          <Text style={styles.splitOutstandingCaption}>Outstanding split obligations · ₹{(outstandingTotalPaise / 100).toFixed(2)}</Text>
+          <Text style={styles.splitOutstandingCaption}>Split-level obligations (before netting) · ₹{(outstandingTotalPaise / 100).toFixed(2)}</Text>
           <View style={styles.splitMetricsRow}>
             <View style={styles.splitMetricTile}>
               <View style={styles.splitMetricHeading}><ArrowDownLeft size={14} color="#B9F6DD" /><Text style={styles.splitMetricLabel}>You get</Text></View>
@@ -460,7 +454,7 @@ export default function FriendsScreen() {
           <View style={styles.infoBannerIcon}><ShieldCheck size={18} color={colors.primary} /></View>
           <View style={styles.infoBannerBody}>
             <Text style={styles.infoBannerTitle}>How suggestions work</Text>
-            <Text style={styles.infoBannerText}>Suggestions require a currently accepted friendship. Mutual groups may be netted to reduce transfers; bridge relationships remain bilateral. A group-net payment does not mark individual splits as paid. A suggestion is complete only after the recipient accepts.</Text>
+            <Text style={styles.infoBannerText}>Suggestions require a currently accepted friendship. Mutual groups may be netted to reduce transfers; bridge relationships remain bilateral. After a net payment is accepted, associated splits show Settlement started; once the pair or group balance is fully cleared, they show Settled. Pending requests do not count as payments.</Text>
           </View>
         </View>
 
@@ -567,7 +561,7 @@ export default function FriendsScreen() {
                 <Text style={styles.suggestionName} numberOfLines={1}>{split.title || 'Shared expense'}</Text>
                 <Text style={styles.suggestionMeta}>{Array.isArray(split.participants) ? `${split.participants.length} participants` : 'Shared expense'}{split.sourceDate ? ` · ${split.sourceDate}` : ''}</Text>
               </View>
-              <View style={styles.recentSplitRight}><Text style={styles.recentSplitAmount}>₹{(split.totalAmountInPaise / 100).toFixed(2)}</Text><View style={styles.splitStatusPill}><Text style={styles.splitStatusText}>{String(split.status || 'active').replaceAll('_', ' ')}</Text></View></View>
+              <View style={styles.recentSplitRight}><Text style={styles.recentSplitAmount}>₹{(split.totalAmountInPaise / 100).toFixed(2)}</Text><View style={styles.splitStatusPill}><Text style={styles.splitStatusText}>{String(split.settlementDisplayStatus || split.status || 'active').replaceAll('_', ' ')}</Text></View></View>
               <ChevronRight size={17} color={colors.textLight} />
             </TouchableOpacity>
           ))}
@@ -582,7 +576,7 @@ export default function FriendsScreen() {
     const incoming = friendSettlements.filter((item) => item.status === 'pending' && item.toUserId === userId);
     const outgoing = friendSettlements.filter((item) => item.status === 'pending' && item.fromUserId === userId);
     const history = friendSettlements
-      .filter((item) => item.status !== 'pending')
+      .filter((item) => item.status !== 'pending' && (item.fromUserId === userId || item.toUserId === userId))
       .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
     const empty = (message: string) => (
       <View style={styles.paymentEmptyState}><View style={styles.paymentEmptyIcon}><ArrowLeftRight size={20} color={colors.textLight} /></View><Text style={styles.paymentEmptyText}>{message}</Text></View>

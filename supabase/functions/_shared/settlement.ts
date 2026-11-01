@@ -8,8 +8,9 @@
  *   because all pairs in that block are direct friends.
  * - Bridge relationships (including a friend connected only through Aryan) stay
  *   bilateral. A chain or ordinary connected component is not treated as a clique.
- * - Group-net transfers change only the global friend-settlement ledger; they do
- *   not rewrite or mark original split obligations as paid.
+ * - Group-net transfers change only the global friend-settlement ledger. The
+ *   trusted backend derives display-only statuses for associated splits from
+ *   the complete ledger; original split obligation records are never rewritten.
  */
 export type FriendshipRecord = {
   userId?: unknown;
@@ -520,4 +521,154 @@ export function calculateFriendshipAwarePlan(
     suggestions: focusedSuggestions.sort((a, b) => compareIds(a.fromUserId, b.fromUserId) || compareIds(a.toUserId, b.toUserId)),
     unresolvedObligations: focusedUnresolved.sort((a, b) => compareIds(a.fromUserId, b.fromUserId) || compareIds(a.toUserId, b.toUserId)),
   };
+}
+
+export type NetSettlementSplitStatus = 'settlement_started' | 'settled';
+
+export type SplitLedgerObligation = LedgerObligation & {
+  splitId: string;
+};
+
+/**
+ * Derive display-only statuses for source splits using the complete network
+ * ledger. A friend-level net payment is not allocated back into source split
+ * documents, so clients must not attempt this calculation from only the splits
+ * visible to one user. Pending requests are deliberately ignored: only accepted
+ * transfers count as settlement progress.
+ *
+ * A clique split is settled only when every member's aggregate balance inside
+ * that saved clique is zero. A bilateral split is settled only when the net
+ * balance for that exact pair is zero. A split with any other unpaid obligation
+ * remains in `settlement_started` even if one of its pairs has cleared.
+ */
+export function deriveNetSettlementSplitStatuses(
+  obligations: SplitLedgerObligation[],
+  friendSettlements: LedgerFriendSettlement[],
+): Record<string, NetSettlementSplitStatus> {
+  type Entry = SplitLedgerObligation & {
+    key: string;
+    outstandingAmountInPaise: number;
+  };
+
+  const entries: Entry[] = obligations.map((obligation) => {
+    if (!obligation.splitId || !obligation.fromUserId || !obligation.toUserId
+      || obligation.fromUserId === obligation.toUserId) {
+      throw new Error('A split contains an invalid net-settlement obligation');
+    }
+    const amount = requirePaise(obligation.amountInPaise, 'Split obligation', false);
+    const accepted = requirePaise(obligation.acceptedAmountInPaise ?? 0, 'Accepted split repayment');
+    if (accepted > amount) throw new Error('Accepted split repayments exceed a split obligation');
+    return {
+      ...obligation,
+      key: JSON.stringify([obligation.splitId, obligation.fromUserId, obligation.toUserId]),
+      outstandingAmountInPaise: amount - accepted,
+    };
+  });
+
+  const acceptedSettlements = deduplicateFriendSettlementRecords(friendSettlements)
+    .filter((settlement) => settlement.status === 'accepted');
+  const started = new Set<string>();
+  const settled = new Set<string>();
+
+  const cliqueGroups = new Map<string, { userIds: string[] }>();
+  for (const settlement of acceptedSettlements) {
+    if (settlement.settlementMode !== 'clique_net') continue;
+    const userIds = [...new Set(settlement.settlementGroupUserIds ?? [])].sort(compareIds);
+    if (userIds.length < 3 || !userIds.includes(settlement.fromUserId) || !userIds.includes(settlement.toUserId)) continue;
+    const key = userIds.join('\u0000');
+    const group = cliqueGroups.get(key) ?? { userIds };
+    cliqueGroups.set(key, group);
+  }
+
+  for (const group of cliqueGroups.values()) {
+    const members = new Set(group.userIds);
+    const groupObligations = entries.filter((entry) =>
+      members.has(entry.fromUserId) && members.has(entry.toUserId),
+    );
+    const balances: Record<string, number> = Object.fromEntries(group.userIds.map((id) => [id, 0]));
+    for (const obligation of groupObligations) {
+      adjustBalance(balances, obligation.fromUserId, -obligation.outstandingAmountInPaise, 'Clique settlement balance');
+      adjustBalance(balances, obligation.toUserId, obligation.outstandingAmountInPaise, 'Clique settlement balance');
+    }
+    // Count every accepted transfer internal to this clique. Older bilateral
+    // records and current clique-net rows are both real transfers in the same
+    // network ledger and must not be double-counted as separate pair settlements.
+    const groupSettlements = acceptedSettlements.filter((settlement) =>
+      members.has(settlement.fromUserId) && members.has(settlement.toUserId),
+    );
+    for (const settlement of groupSettlements) {
+      adjustBalance(balances, settlement.fromUserId, settlement.amountInPaise, 'Clique settlement balance');
+      adjustBalance(balances, settlement.toUserId, -settlement.amountInPaise, 'Clique settlement balance');
+    }
+    const fullyCleared = Object.values(balances).every((amount) => amount === 0);
+    for (const obligation of groupObligations) {
+      if (obligation.outstandingAmountInPaise <= 0) continue;
+      started.add(obligation.key);
+      if (fullyCleared) settled.add(obligation.key);
+    }
+  }
+
+  const bilateralGroups = new Map<string, { first: string; second: string; settlements: LedgerFriendSettlement[] }>();
+  for (const settlement of acceptedSettlements) {
+    if (settlement.settlementMode === 'clique_net') continue;
+    const belongsToAcceptedClique = [...cliqueGroups.values()].some((group) =>
+      group.userIds.includes(settlement.fromUserId) && group.userIds.includes(settlement.toUserId),
+    );
+    if (belongsToAcceptedClique) continue;
+    const [first, second] = [settlement.fromUserId, settlement.toUserId].sort(compareIds);
+    const key = canonicalFriendshipKey(first, second);
+    const group = bilateralGroups.get(key) ?? { first, second, settlements: [] };
+    group.settlements.push(settlement);
+    bilateralGroups.set(key, group);
+  }
+
+  for (const group of bilateralGroups.values()) {
+    const pairObligations = entries.filter((entry) =>
+      (entry.fromUserId === group.first && entry.toUserId === group.second)
+      || (entry.fromUserId === group.second && entry.toUserId === group.first),
+    );
+    let signed = 0; // Positive: first owes second; negative: second owes first.
+    for (const obligation of pairObligations) {
+      signed = addSafeInteger(
+        signed,
+        obligation.fromUserId === group.first
+          ? obligation.outstandingAmountInPaise
+          : -obligation.outstandingAmountInPaise,
+        'Bilateral net-settlement balance',
+      );
+    }
+    for (const settlement of group.settlements) {
+      signed = addSafeInteger(
+        signed,
+        settlement.fromUserId === group.first
+          ? -settlement.amountInPaise
+          : settlement.amountInPaise,
+        'Bilateral net-settlement balance',
+      );
+    }
+    const fullyCleared = signed === 0;
+    for (const obligation of pairObligations) {
+      if (obligation.outstandingAmountInPaise <= 0) continue;
+      started.add(obligation.key);
+      if (fullyCleared) settled.add(obligation.key);
+    }
+  }
+
+  const obligationsBySplit = new Map<string, Entry[]>();
+  for (const entry of entries) {
+    const rows = obligationsBySplit.get(entry.splitId) ?? [];
+    rows.push(entry);
+    obligationsBySplit.set(entry.splitId, rows);
+  }
+
+  const result: Record<string, NetSettlementSplitStatus> = {};
+  for (const [splitId, splitObligations] of obligationsBySplit) {
+    const hasProgress = splitObligations.some((entry) => started.has(entry.key));
+    if (!hasProgress) continue;
+    const allCleared = splitObligations.every((entry) =>
+      entry.outstandingAmountInPaise === 0 || settled.has(entry.key),
+    );
+    result[splitId] = allCleared ? 'settled' : 'settlement_started';
+  }
+  return result;
 }

@@ -15,6 +15,8 @@ export default function SplitCard({ split }: { split: SharedExpenseSplit }) {
   const amountToPay = split.obligations
     .filter((obligation) => obligation.fromUserId === userId)
     .reduce((sum, obligation) => sum + obligation.amountInPaise - obligation.acceptedAmountInPaise, 0);
+  const hasNetSettlementStatus = split.settlementDisplayStatus === 'settlement_started'
+    || split.settlementDisplayStatus === 'settled';
 
   return (
     <TouchableOpacity
@@ -22,11 +24,11 @@ export default function SplitCard({ split }: { split: SharedExpenseSplit }) {
       onPress={() => router.push(`/splits/${split.id}`)}
     >
       <Text style={styles.amount}>{split.title} · ₹{(split.totalAmountInPaise / 100).toFixed(2)}</Text>
-      {amountToReceive > 0 && <Text style={styles.green}>To receive ₹{(amountToReceive / 100).toFixed(2)}</Text>}
-      {amountToPay > 0 && <Text style={styles.red}>You owe ₹{(amountToPay / 100).toFixed(2)}</Text>}
+      {!hasNetSettlementStatus && amountToReceive > 0 && <Text style={styles.green}>To receive ₹{(amountToReceive / 100).toFixed(2)}</Text>}
+      {!hasNetSettlementStatus && amountToPay > 0 && <Text style={styles.red}>You owe ₹{(amountToPay / 100).toFixed(2)}</Text>}
 
       <Text style={styles.sub}>
-        {split.participants.length} participants · {split.status.replaceAll('_', ' ')}
+        {split.participants.length} participants · {(split.settlementDisplayStatus || split.status).replaceAll('_', ' ')}
       </Text>
     </TouchableOpacity>
   );

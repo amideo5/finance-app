@@ -7,7 +7,7 @@ import { ArrowLeft, Check, CircleCheck, Clock3, Info, ReceiptText, ShieldCheck, 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { acceptRepayment, cancelRepayment, cancelSplit, getSplit, getSplitSettlements, rejectRepayment, requestRepayment } from '@/src/services/firebase/splitService';
+import { acceptRepayment, cancelRepayment, cancelSplit, getSplit, getSplitSettlements, getUserSplitLedger, rejectRepayment, requestRepayment } from '@/src/services/firebase/splitService';
 import type { SharedExpenseSplit, SplitSettlement } from '@/types/finance';
 
 const money = (paise: number) => `₹${(paise / 100).toFixed(2)}`;
@@ -29,8 +29,14 @@ export default function SplitDetail() {
     if (!splitId) return;
     setLoading(true);
     try {
-      const [currentSplit, history] = await Promise.all([getSplit(splitId), getSplitSettlements(splitId)]);
-      setSplit(currentSplit);
+      const [currentSplit, directHistory, ledger] = await Promise.all([
+        getSplit(splitId),
+        getSplitSettlements(splitId),
+        currentProfile?.userId ? getUserSplitLedger(currentProfile.userId) : Promise.resolve(null),
+      ]);
+      const statusAwareSplit = ledger?.splits.find((item) => item.id === splitId) ?? currentSplit;
+      const history = ledger?.splitSettlements.filter((item) => item.splitId === splitId) ?? directHistory;
+      setSplit(statusAwareSplit);
       setSettlements(history.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))));
     } catch (error) {
       console.error('Unable to load split details', error);
@@ -38,7 +44,7 @@ export default function SplitDetail() {
     } finally {
       setLoading(false);
     }
-  }, [splitId]);
+  }, [splitId, currentProfile?.userId]);
 
   useEffect(() => {
     // Async Firestore refresh is applied after the effect returns.
@@ -82,8 +88,12 @@ export default function SplitDetail() {
   const outstanding = myObligations.reduce((sum, obligation) => sum + obligation.amountInPaise - obligation.acceptedAmountInPaise, 0);
   const pendingForMe = settlements.filter((item) => item.status === 'pending' && item.toUserId === userId);
   const ownPending = settlements.filter((item) => item.status === 'pending' && item.fromUserId === userId);
-  const statusLabel = String(split.status || 'active').replace(/_/g, ' ');
-  const completed = split.finalizationStatus === 'complete';
+  const statusLabel = String(split.settlementDisplayStatus || split.status || 'active').replace(/_/g, ' ');
+  const allocationsFinalized = split.finalizationStatus === 'complete';
+  const netSettlementStarted = split.settlementDisplayStatus === 'settlement_started';
+  const netSettlementCompleted = split.settlementDisplayStatus === 'settled';
+  const settlementCompleted = allocationsFinalized || netSettlementCompleted;
+  const hasNetSettlementStatus = netSettlementStarted || netSettlementCompleted;
   const cancelled = split.status === 'cancelled';
 
   const submitAcknowledgment = () => {
@@ -124,11 +134,11 @@ export default function SplitDetail() {
           {split.description ? <Text style={styles.subtitle}>{split.description}</Text> : <Text style={styles.subtitle}>Review the original payment, everyone’s share and the current split status.</Text>}
         </View>
 
-        <LinearGradient colors={cancelled ? ['#4A3546', '#885367'] : completed ? ['#105C48', '#17A673', '#39B88E'] : ['#29265E', '#5146D8', '#756BFF']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.hero}>
+        <LinearGradient colors={cancelled ? ['#4A3546', '#885367'] : settlementCompleted ? ['#105C48', '#17A673', '#39B88E'] : ['#29265E', '#5146D8', '#756BFF']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.hero}>
           <View style={styles.heroTopRow}>
             <View style={styles.heroIcon}><ReceiptText size={21} color="#FFFFFF" /></View>
-            <View style={[styles.statusPill, cancelled && styles.statusPillCancelled, completed && styles.statusPillCompleted]}>
-              {completed ? <Check size={13} color="#D5FFEC" /> : cancelled ? <Info size={13} color="#FFE4E9" /> : <Clock3 size={13} color="#F9E7AF" />}
+            <View style={[styles.statusPill, cancelled && styles.statusPillCancelled, settlementCompleted && styles.statusPillCompleted]}>
+              {settlementCompleted ? <Check size={13} color="#D5FFEC" /> : cancelled ? <Info size={13} color="#FFE4E9" /> : <Clock3 size={13} color="#F9E7AF" />}
               <Text style={styles.statusText}>{statusLabel}</Text>
             </View>
           </View>
@@ -138,11 +148,11 @@ export default function SplitDetail() {
           <View style={styles.heroDivider} />
           <View style={styles.heroBottomRow}>
             <View style={styles.heroMetaItem}><UsersRound size={15} color="#E3E1FF" /><Text style={styles.heroMetaText}>{split.participants.length} participant{split.participants.length === 1 ? '' : 's'}</Text></View>
-            <View style={styles.heroMetaItem}><ShieldCheck size={15} color="#E3E1FF" /><Text style={styles.heroMetaText}>{completed ? 'Allocations finalized' : cancelled ? 'Split cancelled' : 'Shared allocation'}</Text></View>
+            <View style={styles.heroMetaItem}><ShieldCheck size={15} color="#E3E1FF" /><Text style={styles.heroMetaText}>{allocationsFinalized ? 'Allocations finalized' : netSettlementCompleted ? 'Net settlement completed' : cancelled ? 'Split cancelled' : 'Shared allocation'}</Text></View>
           </View>
         </LinearGradient>
 
-        {isCreditor && split.status !== 'cancelled' && split.finalizationStatus !== 'complete' && (
+        {isCreditor && split.status !== 'cancelled' && split.settlementDisplayStatus !== 'settled' && split.settlementDisplayStatus !== 'settlement_started' && split.finalizationStatus !== 'complete' && (
           <TouchableOpacity disabled={busy} activeOpacity={0.82} style={[styles.cancelCard, busy && styles.disabled]} onPress={() => Alert.alert(
             'Cancel shared expense?',
             'This is only allowed before any repayment is accepted or allocations are finalized.',
@@ -172,7 +182,7 @@ export default function SplitDetail() {
                 <View style={[styles.avatar, isPayer && styles.payerAvatar]}><Text style={[styles.avatarText, isPayer && styles.payerAvatarText]}>{String(name).trim().charAt(0).toUpperCase()}</Text></View>
                 <View style={styles.personCopy}>
                   <Text style={styles.person} numberOfLines={1}>{name}{participant.userId === userId ? ' (you)' : ''}</Text>
-                  <Text style={styles.personMeta}>{isPayer ? 'Original payer' : 'Participant'}{obligation ? ` · outstanding ${money(obligation.amountInPaise - obligation.acceptedAmountInPaise)}` : ''}</Text>
+                  <Text style={styles.personMeta}>{isPayer ? 'Original payer' : 'Participant'}{obligation ? hasNetSettlementStatus ? ` · original obligation ${money(obligation.amountInPaise)}` : ` · outstanding ${money(obligation.amountInPaise - obligation.acceptedAmountInPaise)}` : ''}</Text>
                 </View>
                 <View style={styles.shareValueWrap}><Text style={styles.shareValue}>{money(participant.shareAmountInPaise)}</Text><Text style={styles.shareCaption}>SHARE</Text></View>
               </View>
@@ -184,7 +194,14 @@ export default function SplitDetail() {
           <View style={styles.notice}><Info size={17} color={colors.info} /><Text style={styles.noticeText}>The payer is excluded from allocation and has zero consumption share.</Text></View>
         )}
 
-        {myObligations.length > 0 && (
+        {hasNetSettlementStatus && (
+          <View style={styles.notice}>
+            <Info size={17} color={colors.info} />
+            <Text style={styles.noticeText}>{netSettlementCompleted ? 'This split is settled through accepted friend-level net payments.' : 'A friend-level net payment has been accepted. Settlement is in progress.'} The original split obligations remain unchanged; the amounts below show the original split allocation, not the remaining group balance.</Text>
+          </View>
+        )}
+
+        {myObligations.length > 0 && !hasNetSettlementStatus && (
           <LinearGradient colors={['#F2F1FF', '#FAFAFF']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.outstandingCard}>
             <View style={styles.outstandingTop}><View style={styles.outstandingIcon}><WalletIconFallback /></View><Text style={styles.outstandingLabel}>YOUR OUTSTANDING SHARE</Text></View>
             <Text style={styles.outstandingAmount}>{money(outstanding)}</Text>
@@ -192,10 +209,16 @@ export default function SplitDetail() {
           </LinearGradient>
         )}
 
-        {completed && (
+        {allocationsFinalized && (
           <View style={styles.completeCard}>
             <View style={styles.completeIcon}><CircleCheck size={19} color={colors.income} /></View>
             <View style={styles.completeCopy}><Text style={styles.completeTitle}>Allocations finalized</Text><Text style={styles.completeSubtitle}>Final participant expense allocations have been recorded.</Text></View>
+          </View>
+        )}
+        {netSettlementCompleted && !allocationsFinalized && (
+          <View style={styles.completeCard}>
+            <View style={styles.completeIcon}><CircleCheck size={19} color={colors.income} /></View>
+            <View style={styles.completeCopy}><Text style={styles.completeTitle}>Net settlement completed</Text><Text style={styles.completeSubtitle}>All associated friend-level net balances have been cleared.</Text></View>
           </View>
         )}
 
