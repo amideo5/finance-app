@@ -424,3 +424,8 @@ entrypoint = "./functions/split-health/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/split-health/*.html" ]
+
+[functions.stock-quote]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stock-quote/index.ts"

@@ -7,6 +7,7 @@ import {
   transferToInvestment,
 } from '@/src/services/firebase/investmentsService';
 import { isDateKey, toLocalDateKey } from '@/src/utils/validation';
+import { fetchMutualFundHistoricalNav } from '@/src/services/marketData/investmentPrices';
 import {
   useFocusEffect,
   useLocalSearchParams,
@@ -20,8 +21,9 @@ import {
   Check,
   ShieldCheck,
   Wallet,
+  Plus,
 } from 'lucide-react-native';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   ScrollView,
@@ -63,6 +65,13 @@ export default function TransferToInvestmentScreen() {
   );
   const [accountId, setAccountId] = useState('');
   const [amount, setAmount] = useState('');
+  const [unitPrice, setUnitPrice] = useState('');
+  const [unitPriceDate, setUnitPriceDate] = useState('');
+  const [unitPriceLabel, setUnitPriceLabel] = useState('');
+  const [unitPriceError, setUnitPriceError] = useState('');
+  const [unitPriceLoading, setUnitPriceLoading] = useState(false);
+  const [manualNavOverride, setManualNavOverride] = useState(false);
+  const [transactionCharges, setTransactionCharges] = useState('');
   const [date, setDate] = useState(toLocalDateKey(new Date()));
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(false);
@@ -120,10 +129,58 @@ export default function TransferToInvestmentScreen() {
   const selectedInvestment = investments.find(
     (item) => item.id === investmentId,
   );
+
+  useEffect(() => {
+    if (
+      selectedInvestment?.assetClass !== 'mutual_fund' ||
+      !selectedInvestment?.marketDataId ||
+      manualNavOverride ||
+      !isDateKey(date) ||
+      date > toLocalDateKey(new Date())
+    ) return;
+
+    let active = true;
+    setUnitPriceLoading(true);
+    setUnitPriceError('');
+    setUnitPrice('');
+    setUnitPriceDate('');
+    setUnitPriceLabel('');
+    fetchMutualFundHistoricalNav(String(selectedInvestment.marketDataId), date)
+      .then((result) => {
+        if (!active) return;
+        setUnitPrice(String(result.price));
+        setUnitPriceDate(result.date);
+        setUnitPriceLabel(result.label);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setUnitPriceError(error instanceof Error ? error.message : 'Could not fetch historical mutual-fund NAV.');
+      })
+      .finally(() => {
+        if (active) setUnitPriceLoading(false);
+      });
+
+    return () => { active = false; };
+  }, [selectedInvestment?.id, selectedInvestment?.assetClass, selectedInvestment?.marketDataId, date, manualNavOverride]);
+
   const selectedAccount = accounts.find(
     (item) => item.id === accountId,
   );
   const availableBalance = Number(selectedAccount?.balance || 0);
+  const isMarketInvestment = ['stock', 'mutual_fund'].includes(selectedInvestment?.assetClass || '');
+  const estimatedUnits = (() => {
+    const budget = Number(amount.replace(/,/g, ''));
+    const price = Number(unitPrice);
+    if (!isMarketInvestment || !Number.isFinite(budget) || !Number.isFinite(price) || budget <= 0 || price <= 0) return null;
+    const fee = Number(transactionCharges.replace(/,/g, '')) || 0;
+    const investable = Math.max(0, budget - fee);
+    return selectedInvestment?.assetClass === 'stock'
+      ? Math.floor(investable / price)
+      : Math.floor((investable / price) * 1_000_000) / 1_000_000;
+  })();
+  const estimatedMarketDebitInPaise = estimatedUnits !== null
+    ? Math.round(estimatedUnits * Number(unitPrice) * 100) + (parsePaise(transactionCharges) || 0)
+    : null;
 
   const submit = async () => {
     const amountInPaise = parsePaise(amount);
@@ -144,10 +201,10 @@ export default function TransferToInvestmentScreen() {
       return;
     }
 
-    if (!isDateKey(date)) {
+    if (!isDateKey(date) || date > toLocalDateKey(new Date())) {
       Alert.alert(
         'Invalid date',
-        'Enter a valid date in YYYY-MM-DD format.',
+        'Enter a valid date up to today in YYYY-MM-DD format.',
       );
       return;
     }
@@ -160,10 +217,22 @@ export default function TransferToInvestmentScreen() {
       return;
     }
 
-    if (amountInPaise > Math.round(availableBalance * 100)) {
+    if (isMarketInvestment && transactionCharges.trim() && parsePaise(transactionCharges) === null) {
+      Alert.alert('Invalid charges', 'Enter valid transaction charges or leave the field blank.');
+      return;
+    }
+
+    if (isMarketInvestment && (!Number.isFinite(Number(unitPrice)) || Number(unitPrice) <= 0)) {
+      Alert.alert('Execution price required', selectedInvestment?.assetClass === 'stock' ? 'Enter the price per share for this purchase.' : 'Enter the applicable NAV for this purchase.');
+      return;
+    }
+
+    const availableBalanceInPaise = Math.round(availableBalance * 100);
+    const requiredDebitInPaise = isMarketInvestment ? estimatedMarketDebitInPaise : amountInPaise;
+    if (requiredDebitInPaise === null || requiredDebitInPaise > availableBalanceInPaise) {
       Alert.alert(
         'Insufficient balance',
-        `This account has ₹${availableBalance.toLocaleString('en-IN')} available. Choose a smaller amount or a different account.`,
+        `This account has ₹${availableBalance.toLocaleString('en-IN')} available. The calculated purchase debit (including charges) must fit within that balance.`,
       );
       return;
     }
@@ -175,6 +244,10 @@ export default function TransferToInvestmentScreen() {
         investmentId,
         accountId,
         amountInPaise,
+        unitPrice: isMarketInvestment ? Number(unitPrice) : null,
+        unitPriceDate: selectedInvestment?.assetClass === 'mutual_fund' ? (manualNavOverride ? date : unitPriceDate || null) : null,
+        unitPriceSource: selectedInvestment?.assetClass === 'mutual_fund' ? (manualNavOverride ? 'amc_allotment_statement' : 'mfapi_historical_nav') : null,
+        transactionChargesInPaise: isMarketInvestment ? (parsePaise(transactionCharges) || 0) : 0,
         date,
         notes: notes.trim(),
         currency: currentProfile.currency || 'INR',
@@ -346,7 +419,7 @@ export default function TransferToInvestmentScreen() {
               return (
                 <TouchableOpacity
                   key={item.id}
-                  onPress={() => setInvestmentId(item.id)}
+                  onPress={() => { if (item.id !== investmentId) { setUnitPrice(''); setUnitPriceDate(''); setUnitPriceLabel(''); setUnitPriceError(''); setManualNavOverride(false); } setInvestmentId(item.id); }}
                   style={[
                     styles.option,
                     selected && styles.optionSelected,
@@ -379,18 +452,88 @@ export default function TransferToInvestmentScreen() {
           <View style={styles.emptyBox}>
             <Banknote size={22} color={colors.primary} />
             <Text style={styles.emptyText}>
-              Add a holding before transferring money into it.
+              You don't have an investment holding yet. Create one directly from this bank account.
             </Text>
-            <TouchableOpacity
-              style={styles.linkButton}
-              onPress={() => router.push('/investments/add')}
-            >
-              <Text style={styles.linkText}>Create investment</Text>
-            </TouchableOpacity>
           </View>
         )}
 
-        <Text style={styles.label}>TRANSFER AMOUNT (₹)</Text>
+        <TouchableOpacity
+          style={[styles.option, styles.createInvestmentOption, !accountId && styles.disabled]}
+          disabled={!accountId || saving || loading}
+          onPress={() => {
+            if (!accountId) {
+              Alert.alert('Choose a bank account', 'Select the source account before creating and funding a new investment.');
+              return;
+            }
+            router.push({ pathname: '/investments/add', params: { fundingAccountId: accountId } });
+          }}
+        >
+          <View style={styles.createInvestmentIcon}>
+            <Plus size={17} color={colors.primary} />
+          </View>
+          <View style={styles.optionCopy}>
+            <Text style={[styles.optionTitle, styles.selectedText]}>Create new investment</Text>
+            <Text style={styles.optionSubtitle}>
+              Fund a new stock, mutual fund, FD, RD or other holding from {selectedAccount?.name || 'the selected bank account'}.
+            </Text>
+          </View>
+          <ArrowDownRight size={17} color={colors.primary} />
+        </TouchableOpacity>
+
+        {isMarketInvestment ? (
+          selectedInvestment?.assetClass === 'mutual_fund' ? (
+            <View style={styles.flowCard}>
+              {manualNavOverride ? (
+                <>
+                  <Text style={styles.label}>ACTUAL AMC ALLOTMENT NAV (₹ PER UNIT)</Text>
+                  <TextInput
+                    value={unitPrice}
+                    onChangeText={setUnitPrice}
+                    placeholder="Enter NAV from AMC statement"
+                    placeholderTextColor={colors.textLight}
+                    keyboardType="decimal-pad"
+                    style={styles.input}
+                  />
+                </>
+              ) : (
+                <>
+                  <Text style={styles.label}>AUTOMATIC HISTORICAL NAV</Text>
+                  <Text style={styles.optionSubtitle}>{unitPriceLoading ? 'Fetching NAV for the selected purchase date…' : unitPriceError || (unitPrice ? `₹${Number(unitPrice).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 5 })}` : 'Select a valid date to fetch the applicable historical NAV.')}</Text>
+                  {unitPriceDate ? <Text style={styles.optionSubtitle}>NAV date: {unitPriceDate}</Text> : null}
+                  {unitPriceLabel ? <Text style={styles.optionSubtitle}>{unitPriceLabel}</Text> : null}
+                </>
+              )}
+              <TouchableOpacity
+                style={styles.linkButton}
+                onPress={() => {
+                  setManualNavOverride((current) => !current);
+                  setUnitPrice('');
+                  setUnitPriceDate('');
+                  setUnitPriceLabel('');
+                  setUnitPriceError('');
+                }}
+              >
+                <Text style={styles.linkText}>{manualNavOverride ? 'Use automatic historical NAV' : 'Enter actual NAV from AMC statement'}</Text>
+              </TouchableOpacity>
+              <Text style={styles.optionSubtitle}>The NAV actually allotted depends on transaction timestamp and fund realization. This lookup is a historical reference; confirm against the AMC statement for exact units.</Text>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.label}>EXECUTION PRICE (₹ PER SHARE)</Text>
+              <TextInput
+                value={unitPrice}
+                onChangeText={setUnitPrice}
+                placeholder={selectedInvestment?.lastMarketPrice ? String(selectedInvestment.lastMarketPrice) : 'Enter broker execution price'}
+                placeholderTextColor={colors.textLight}
+                keyboardType="decimal-pad"
+                style={styles.input}
+              />
+              <Text style={styles.optionSubtitle}>Enter the actual broker execution price. Shares are updated from this value.</Text>
+            </>
+          )
+        ) : null}
+
+        <Text style={styles.label}>TRANSFER AMOUNT / PURCHASE BUDGET (₹)</Text>
         <View style={styles.amountField}>
           <Text style={styles.currency}>₹</Text>
           <TextInput
@@ -402,6 +545,24 @@ export default function TransferToInvestmentScreen() {
             style={styles.amountInput}
           />
         </View>
+
+        {estimatedUnits !== null ? (
+          <Text style={styles.optionSubtitle}>Estimated {selectedInvestment?.assetClass === 'stock' ? 'whole shares' : 'units'}: {estimatedUnits.toLocaleString('en-IN', { maximumFractionDigits: 6 })}. The bank is debited only for the calculated trade value and charges.</Text>
+        ) : null}
+
+        {isMarketInvestment ? (
+          <>
+            <Text style={styles.label}>BROKERAGE / TRANSACTION CHARGES (₹)</Text>
+            <TextInput
+              value={transactionCharges}
+              onChangeText={setTransactionCharges}
+              placeholder="0"
+              placeholderTextColor={colors.textLight}
+              keyboardType="decimal-pad"
+              style={styles.input}
+            />
+          </>
+        ) : null}
 
         <Text style={styles.label}>DATE (YYYY-MM-DD)</Text>
         <TextInput
@@ -554,6 +715,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0EFFF',
   },
   optionCopy: { flex: 1, gap: 4 },
+  createInvestmentOption: { marginTop: 9, borderColor: colors.primary, backgroundColor: '#F0EFFF' },
+  createInvestmentIcon: { width: 32, height: 32, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E2E0FF' },
   optionTitle: { color: colors.text, fontSize: 11, fontWeight: '800' },
   optionSubtitle: {
     color: colors.textSecondary,

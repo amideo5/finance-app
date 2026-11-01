@@ -74,6 +74,25 @@ export const getNextContributionSchedule = (
   return { index, date };
 };
 
+/**
+ * Return the first installment that has not been accounted for yet. The first
+ * recurring installment is one interval after the RD start date. When no
+ * installment has been posted, the cursor is therefore the day before the
+ * start date; otherwise it is the last successfully posted installment date.
+ * This deliberately does not compare with today so backdated schedules can be
+ * caught up instead of silently skipping missed installments.
+ */
+export const getNextUnprocessedContributionSchedule = (
+  startDate: string,
+  frequency: ContributionFrequency,
+  lastContributionDate?: string | null,
+): { index: number; date: string } => {
+  const cursorDate = lastContributionDate && isValidDateKey(lastContributionDate)
+    ? lastContributionDate
+    : addDaysToDateKey(startDate, -1);
+  return getNextContributionSchedule(startDate, frequency, cursorDate);
+};
+
 export const getDaysBetween = (startDate: string, endDate: string): number => {
   const [sy, sm, sd] = startDate.split('-').map(Number);
   const [ey, em, ed] = endDate.split('-').map(Number);

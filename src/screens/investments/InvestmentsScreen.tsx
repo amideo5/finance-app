@@ -32,6 +32,10 @@ export default function InvestmentsScreen() {
     snapshots: [],
     totalValueInPaise: 0,
     totalInvestedInPaise: 0,
+    totalRealizedGainLossInPaise: 0,
+    totalUnrealizedGainLossInPaise: 0,
+    totalReturnInPaise: 0,
+    portfolioXirrPercent: null,
   });
   const [loading, setLoading] = useState(true);
 
@@ -43,6 +47,10 @@ export default function InvestmentsScreen() {
         snapshots: [],
         totalValueInPaise: 0,
         totalInvestedInPaise: 0,
+        totalRealizedGainLossInPaise: 0,
+        totalUnrealizedGainLossInPaise: 0,
+        totalReturnInPaise: 0,
+        portfolioXirrPercent: null,
       });
       setLoading(false);
       return;
@@ -72,7 +80,7 @@ export default function InvestmentsScreen() {
   const currency = currentProfile?.currency || 'INR';
   const currentValue = Number(portfolio.totalValueInPaise || 0);
   const invested = Number(portfolio.totalInvestedInPaise || 0);
-  const gain = currentValue - invested;
+  const gain = Number(portfolio.totalReturnInPaise ?? (currentValue - invested));
   const gainPercent = invested > 0 ? (gain / invested) * 100 : 0;
 
   const allocation = useMemo(() => {
@@ -216,6 +224,10 @@ export default function InvestmentsScreen() {
               </Text>
             </View>
           </View>
+
+          {portfolio.portfolioXirrPercent !== null && portfolio.portfolioXirrPercent !== undefined ? (
+            <Text style={[styles.heroStatLabel, { marginTop: 12, fontSize: 11 }]}>Annualized portfolio return (XIRR): {Number(portfolio.portfolioXirrPercent).toFixed(2)}%</Text>
+          ) : null}
 
           <View pointerEvents="none" style={styles.heroGlow} />
         </LinearGradient>

@@ -183,6 +183,14 @@ export interface InvestmentHolding {
   provider?: string | null;
   symbol?: string | null;
   units?: number | null;
+  averageBuyPrice?: number | null;
+  purchaseUnitPrice?: number | null;
+  transactionChargesInPaise?: number;
+  marketAssetAccountingVersion?: number | null;
+  realizedGainLossInPaise?: number;
+  unrealizedGainLossInPaise?: number;
+  totalReturnInPaise?: number;
+  xirrPercent?: number | null;
   currency: string;
   investedAmount: number;
   currentValue: number;
@@ -206,6 +214,7 @@ export interface InvestmentHolding {
   marketDataProvider?: 'mfapi' | 'alpha_vantage' | null;
   lastMarketPrice?: number;
   lastMarketPriceDate?: string;
+  lastMarketPriceSource?: 'mfapi' | 'alpha_vantage' | 'transaction_execution';
   lastMarketRefreshDate?: string;
   marketDataLabel?: string;
   recurringContributionAmount?: number;
@@ -240,6 +249,15 @@ export interface InvestmentLedgerEntry {
   newValueInPaise?: number;
   marketPrice?: number;
   marketPriceDate?: string;
+  marketTransactionType?: 'buy' | 'sell';
+  quantity?: number;
+  unitPrice?: number;
+  tradeValueInPaise?: number;
+  costBasisChangeInPaise?: number;
+  transactionChargesInPaise?: number;
+  realizedGainLossInPaise?: number;
+  remainingQuantity?: number;
+  unspentBudgetInPaise?: number;
   marketDataProvider?: 'mfapi' | 'alpha_vantage';
   valuationRunDate?: string;
   scheduledContribution?: boolean;

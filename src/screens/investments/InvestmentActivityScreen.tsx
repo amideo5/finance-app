@@ -130,6 +130,11 @@ export default function InvestmentActivityScreen() {
   );
 
   const selected = investments.find((item) => item.id === selectedId);
+  const isMarketHolding = ['stock', 'mutual_fund'].includes(selected?.assetClass || '');
+  const effectiveActivityType = isMarketHolding ? 'market_value' : type;
+  const availableActivityTypes = ['stock', 'mutual_fund'].includes(selected?.assetClass || '')
+    ? ACTIVITY_TYPES.filter((item) => item.value === 'market_value')
+    : ACTIVITY_TYPES;
 
   const submit = async () => {
     const amountInPaise = paise(amount);
@@ -152,11 +157,11 @@ export default function InvestmentActivityScreen() {
 
     if (
       amountInPaise === null ||
-      (type !== 'market_value' && amountInPaise <= 0)
+      (effectiveActivityType !== 'market_value' && amountInPaise <= 0)
     ) {
       Alert.alert(
         'Check the amount',
-        type === 'market_value'
+        effectiveActivityType === 'market_value'
           ? 'Enter the new total market value. Zero is allowed.'
           : 'Enter an amount greater than zero.',
       );
@@ -166,10 +171,11 @@ export default function InvestmentActivityScreen() {
     setSaving(true);
 
     try {
+      const activityType = effectiveActivityType;
       await recordInvestmentActivity(currentProfile.id, selectedId, {
-        type,
+        type: activityType,
         amountInPaise,
-        ...(type === 'market_value'
+        ...(activityType === 'market_value'
           ? { newValueInPaise: amountInPaise }
           : {}),
         date,
@@ -278,8 +284,8 @@ export default function InvestmentActivityScreen() {
         <Text style={styles.label}>ACTIVITY TYPE</Text>
 
         <View style={styles.typeGrid}>
-          {ACTIVITY_TYPES.map((item) => {
-            const selectedTypeOption = type === item.value;
+          {availableActivityTypes.map((item) => {
+            const selectedTypeOption = effectiveActivityType === item.value;
 
             return (
               <TouchableOpacity
@@ -329,15 +335,15 @@ export default function InvestmentActivityScreen() {
         </View>
 
         <Text style={styles.label}>
-          {type === 'market_value'
+          {effectiveActivityType === 'market_value'
             ? 'NEW TOTAL MARKET VALUE (₹)'
-            : type === 'interest'
+            : effectiveActivityType === 'interest'
               ? 'INTEREST AMOUNT (₹)'
-              : type === 'gain'
+              : effectiveActivityType === 'gain'
                 ? 'GAIN AMOUNT (₹)'
-                : type === 'loss'
+                : effectiveActivityType === 'loss'
                   ? 'LOSS AMOUNT (₹)'
-                  : type === 'withdrawal'
+                  : effectiveActivityType === 'withdrawal'
                     ? 'WITHDRAWAL AMOUNT (₹)'
                     : 'CONTRIBUTION AMOUNT (₹)'}
         </Text>
@@ -348,7 +354,7 @@ export default function InvestmentActivityScreen() {
             value={amount}
             onChangeText={setAmount}
             placeholder={
-              type === 'market_value'
+              effectiveActivityType === 'market_value'
                 ? String(Math.round(Number(selected?.currentValue || 0)))
                 : '1000'
             }
@@ -359,13 +365,13 @@ export default function InvestmentActivityScreen() {
         </View>
 
         <Text style={styles.helper}>
-          {type === 'market_value'
+          {effectiveActivityType === 'market_value'
             ? 'This replaces the current value; invested capital is unchanged.'
-            : type === 'interest' || type === 'gain'
+            : effectiveActivityType === 'interest' || effectiveActivityType === 'gain'
               ? 'This increases current value without increasing invested capital.'
-              : type === 'loss'
+              : effectiveActivityType === 'loss'
                 ? 'This reduces current value without changing invested capital.'
-                : type === 'withdrawal'
+                : effectiveActivityType === 'withdrawal'
                   ? 'This reduces current value and net invested capital only. Use “Transfer out” if the money is also being credited to a linked bank account.'
                   : 'Manual contribution changes the portfolio only; use “Transfer in” or “Transfer out” when money should also move to or from a linked bank account.'}
         </Text>
@@ -390,6 +396,10 @@ export default function InvestmentActivityScreen() {
           multiline
           textAlignVertical="top"
         />
+
+        {selected && ['stock', 'mutual_fund'].includes(selected.assetClass) ? (
+          <Text style={styles.helper}>For stocks and mutual funds, purchases and sales must use Transfer in / Transfer out. This manual action is only for an exceptional manual valuation override.</Text>
+        ) : null}
 
         {selected ? (
           <View style={styles.selectedSummary}>

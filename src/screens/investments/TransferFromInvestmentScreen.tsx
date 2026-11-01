@@ -68,6 +68,8 @@ export default function TransferFromInvestmentScreen() {
   );
   const [accountId, setAccountId] = useState('');
   const [amount, setAmount] = useState('');
+  const [unitPrice, setUnitPrice] = useState('');
+  const [transactionCharges, setTransactionCharges] = useState('');
   const [date, setDate] = useState(toLocalDateKey(new Date()));
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(false);
@@ -129,6 +131,24 @@ export default function TransferFromInvestmentScreen() {
   const selectedAccount = accounts.find(
     (item) => item.id === accountId,
   );
+  const isMarketInvestment = ['stock', 'mutual_fund'].includes(selectedInvestment?.assetClass || '');
+  const salePreview = (() => {
+    if (!isMarketInvestment) return null;
+    const target = Number(amount.replace(/,/g, '').trim());
+    const price = Number(unitPrice);
+    const heldUnits = Number(selectedInvestment?.units || 0);
+    const charges = Number(transactionCharges.replace(/,/g, '')) || 0;
+    if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(price) || price <= 0 || heldUnits <= 0) return null;
+    const requestedUnits = selectedInvestment?.assetClass === 'stock'
+      ? Math.floor(target / price)
+      : Math.floor((target / price) * 1_000_000) / 1_000_000;
+    if (requestedUnits <= 0 || requestedUnits > heldUnits || target > heldUnits * price + 0.01) return null;
+    const grossProceeds = Math.round(requestedUnits * price * 100) / 100;
+    const netProceeds = grossProceeds - charges;
+    const costBasis = Number(selectedInvestment?.investedAmountInPaise || 0) / 100;
+    const costBasisSold = heldUnits > 0 ? costBasis * requestedUnits / heldUnits : 0;
+    return { quantity: requestedUnits, grossProceeds, netProceeds, costBasisSold, realizedGainLoss: netProceeds - costBasisSold };
+  })();
 
   const availableValueInPaise = Number.isSafeInteger(
     selectedInvestment?.currentValueInPaise,
@@ -171,7 +191,17 @@ export default function TransferFromInvestmentScreen() {
       return;
     }
 
-    if (amountInPaise > availableValueInPaise) {
+    if (isMarketInvestment && transactionCharges.trim() && parsePaise(transactionCharges) === null) {
+      Alert.alert('Invalid charges', 'Enter valid transaction charges or leave the field blank.');
+      return;
+    }
+
+    if (isMarketInvestment && (!Number.isFinite(Number(unitPrice)) || Number(unitPrice) <= 0)) {
+      Alert.alert('Execution price required', selectedInvestment?.assetClass === 'stock' ? 'Enter the actual sale price per share.' : 'Enter the applicable redemption NAV.');
+      return;
+    }
+
+    if (!isMarketInvestment && amountInPaise > availableValueInPaise) {
       Alert.alert(
         'Insufficient investment value',
         `This holding is currently worth ${money(
@@ -188,6 +218,8 @@ export default function TransferFromInvestmentScreen() {
         investmentId,
         accountId,
         amountInPaise,
+        unitPrice: isMarketInvestment ? Number(unitPrice) : null,
+        transactionChargesInPaise: isMarketInvestment ? (parsePaise(transactionCharges) || 0) : 0,
         date,
         notes: notes.trim(),
         currency: currentProfile.currency || 'INR',
@@ -313,7 +345,7 @@ export default function TransferFromInvestmentScreen() {
               return (
                 <TouchableOpacity
                   key={item.id}
-                  onPress={() => setInvestmentId(item.id)}
+                  onPress={() => { if (item.id !== investmentId) setUnitPrice(''); setInvestmentId(item.id); }}
                   style={[
                     styles.option,
                     selected && styles.optionSelected,
@@ -407,7 +439,22 @@ export default function TransferFromInvestmentScreen() {
           </View>
         )}
 
-        <Text style={styles.label}>WITHDRAWAL AMOUNT (₹)</Text>
+        {isMarketInvestment ? (
+          <>
+            <Text style={styles.label}>{selectedInvestment?.assetClass === 'stock' ? 'SALE PRICE (₹ PER SHARE)' : 'REDEMPTION NAV (₹ PER UNIT)'}</Text>
+            <TextInput
+              value={unitPrice}
+              onChangeText={setUnitPrice}
+              placeholder={selectedInvestment?.lastMarketPrice ? String(selectedInvestment.lastMarketPrice) : 'Enter execution price / NAV'}
+              placeholderTextColor={colors.textLight}
+              keyboardType="decimal-pad"
+              style={styles.input}
+            />
+            <Text style={styles.optionSubtitle}>The number of shares/units sold and the proportional acquisition cost are calculated from the execution price.</Text>
+          </>
+        ) : null}
+
+        <Text style={styles.label}>WITHDRAWAL / SALE PROCEEDS TARGET (₹)</Text>
         <View style={styles.amountField}>
           <Text style={styles.currency}>₹</Text>
           <TextInput
@@ -419,6 +466,27 @@ export default function TransferFromInvestmentScreen() {
             style={styles.amountInput}
           />
         </View>
+
+        {isMarketInvestment ? (
+          <>
+            <Text style={styles.label}>BROKERAGE / REDEMPTION CHARGES (₹)</Text>
+            <TextInput
+              value={transactionCharges}
+              onChangeText={setTransactionCharges}
+              placeholder="0"
+              placeholderTextColor={colors.textLight}
+              keyboardType="decimal-pad"
+              style={styles.input}
+            />
+            {salePreview ? (
+              <View style={styles.previewBox}>
+                <Text style={styles.optionSubtitle}>Estimated {selectedInvestment?.assetClass === 'stock' ? 'shares sold' : 'units redeemed'}: {salePreview.quantity.toLocaleString('en-IN', { maximumFractionDigits: 6 })}</Text>
+                <Text style={styles.optionSubtitle}>Gross proceeds: {money(salePreview.grossProceeds)} · Bank credit after charges: {money(salePreview.netProceeds)}</Text>
+                <Text style={[styles.optionSubtitle, { color: salePreview.realizedGainLoss >= 0 ? colors.success : colors.danger }]}>Estimated realized {salePreview.realizedGainLoss >= 0 ? 'gain' : 'loss'}: {money(Math.abs(salePreview.realizedGainLoss))}</Text>
+              </View>
+            ) : null}
+          </>
+        ) : null}
 
         <Text style={styles.label}>DATE (YYYY-MM-DD)</Text>
         <TextInput
@@ -649,4 +717,5 @@ const styles = StyleSheet.create({
   },
   submitText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
   disabled: { opacity: 0.5 },
+  previewBox: { backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.border, padding: 12, marginTop: 10, gap: 4 },
 });

@@ -118,7 +118,9 @@ export default function InvestmentDetailScreen() {
   const currency = currentProfile?.currency || 'INR';
   const value = Number(investment?.currentValueInPaise || 0);
   const invested = Number(investment?.investedAmountInPaise || 0);
-  const gain = value - invested;
+  const unrealizedGain = value - invested;
+  const realizedGain = Number(investment?.realizedGainLossInPaise || 0);
+  const gain = unrealizedGain + realizedGain;
 
   if (loading && !investment) {
     return (
@@ -221,7 +223,7 @@ export default function InvestmentDetailScreen() {
             </View>
 
             <View style={styles.metric}>
-              <Text style={styles.metricLabel}>Gain / loss</Text>
+              <Text style={styles.metricLabel}>Total gain / loss</Text>
               <Text
                 style={[
                   styles.metricValue,
@@ -235,6 +237,14 @@ export default function InvestmentDetailScreen() {
               </Text>
             </View>
           </View>
+          {['stock', 'mutual_fund'].includes(investment.assetClass) ? (
+            <Text style={styles.valuationText}>
+              Unrealized: {unrealizedGain >= 0 ? '+' : '−'}{formatMoneyPaise(Math.abs(unrealizedGain), currency)} · Realized: {realizedGain >= 0 ? '+' : '−'}{formatMoneyPaise(Math.abs(realizedGain), currency)}
+            </Text>
+          ) : null}
+          {investment.xirrPercent !== null && investment.xirrPercent !== undefined ? (
+            <Text style={styles.valuationText}>Annualized return (XIRR): {Number(investment.xirrPercent).toFixed(2)}%</Text>
+          ) : null}
 
           {investment.lastValuationDate ? (
             <Text style={styles.valuationText}>
@@ -339,12 +349,12 @@ export default function InvestmentDetailScreen() {
               <Text style={styles.marketWarning}>
                 {investment.assetClass === 'mutual_fund'
                   ? (!investment.marketDataId || !Number(investment.units)
-                    ? 'Add an MFAPI scheme code and units to enable automatic NAV valuation. Until then, current value remains manual.'
+                    ? 'Add an MFAPI scheme code and purchase units to enable automatic NAV valuation. Until then, current value remains at the opening acquisition value.'
                     : 'No NAV has been fetched yet. Check the scheme code and network connection.')
                   : (!investment.marketDataId || !Number(investment.units)
                     ? 'Add the exchange ticker and share quantity to enable automatic valuation.'
                     : (!hasStockMarketApiKey()
-                      ? 'Stock quotes require EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY in your local environment. Until it is configured, current value remains manual.'
+                      ? 'Configure and deploy the Supabase stock-quote Edge Function to enable secure automatic stock pricing.'
                       : 'No stock quote has been fetched yet. Check the ticker and provider quota.'))}
               </Text>
             )}
@@ -505,11 +515,13 @@ export default function InvestmentDetailScreen() {
 
                   <View style={styles.ledgerCopy}>
                     <Text style={styles.ledgerTitle}>
-                      {item.type === 'bank_transfer'
-                        ? item.direction === 'out'
-                          ? 'Bank transfer out'
-                          : 'Bank transfer in'
-                        : EVENT_LABELS[item.type] || 'Portfolio activity'}
+                      {item.marketTransactionType === 'buy'
+                        ? 'Purchase / buy'
+                        : item.marketTransactionType === 'sell'
+                          ? 'Sale / redemption'
+                          : item.type === 'bank_transfer'
+                            ? item.direction === 'out' ? 'Bank transfer out' : 'Bank transfer in'
+                            : EVENT_LABELS[item.type] || 'Portfolio activity'}
                     </Text>
 
                     <Text style={styles.ledgerDate}>
@@ -533,6 +545,16 @@ export default function InvestmentDetailScreen() {
                       {formatMoneyPaise(Math.abs(delta), currency)}
                     </Text>
 
+                    {item.marketTransactionType ? (
+                      <Text style={styles.ledgerSub}>
+                        {Math.abs(Number(item.quantity || 0)).toLocaleString('en-IN', { maximumFractionDigits: 6 })} {investment.assetClass === 'stock' ? 'shares' : 'units'} @ {formatCurrency(Number(item.unitPrice || 0), currency)}
+                      </Text>
+                    ) : null}
+                    {item.marketTransactionType === 'sell' ? (
+                      <Text style={styles.ledgerSub}>
+                        Realized P&L {Number(item.realizedGainLossInPaise || 0) < 0 ? '−' : '+'}{formatMoneyPaise(Math.abs(Number(item.realizedGainLossInPaise || 0)), currency)}
+                      </Text>
+                    ) : null}
                     {item.type === 'market_value' ? (
                       <Text style={styles.ledgerSub}>
                         Value:{' '}

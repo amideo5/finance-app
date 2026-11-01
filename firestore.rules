@@ -64,7 +64,7 @@ service cloud.firestore {
         && request.resource.data.get('amount', 0) > 0
         && request.resource.data.get('amountInPaise', 0) is int
         && request.resource.data.get('amountInPaise', 0) > 0
-        && exists(investmentPath)
+        && (exists(investmentPath) || existsAfter(investmentPath))
         && exists(accountPath)
         && get(accountPath).data.type == 'bank'
         && existsAfter(ledgerPath)
@@ -83,7 +83,9 @@ service cloud.firestore {
             && request.resource.data.type == 'expense'
             && request.resource.data.category == 'Investment Transfer'
             && getAfter(accountPath).data.balance < get(accountPath).data.balance
-            && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+            && ((exists(investmentPath)
+              && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+              || (!exists(investmentPath) && getAfter(investmentPath).data.currentValue > 0)))
           ||
           (direction == 'out'
             && request.resource.data.type == 'income'
@@ -106,7 +108,7 @@ service cloud.firestore {
         && direction in ['in', 'out']
         && request.resource.data.amountInPaise is int
         && existsAfter(mainTransactionPath)
-        && exists(investmentPath)
+        && (exists(investmentPath) || existsAfter(investmentPath))
         && exists(accountPath)
         && getAfter(accountPath).data.type == 'bank'
         && getAfter(mainTransactionPath).data.kind == 'investment-transfer'
@@ -122,7 +124,9 @@ service cloud.firestore {
             && getAfter(mainTransactionPath).data.category == 'Investment Transfer'
             && getAfter(mainTransactionPath).data.amountInPaise == request.resource.data.amountInPaise
             && getAfter(accountPath).data.balance < get(accountPath).data.balance
-            && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+            && ((exists(investmentPath)
+              && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+              || (!exists(investmentPath) && getAfter(investmentPath).data.currentValue > 0)))
           ||
           (direction == 'out'
             && request.resource.data.amountInPaise < 0

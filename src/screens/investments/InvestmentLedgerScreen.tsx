@@ -135,11 +135,13 @@ export default function InvestmentLedgerScreen() {
       const searchable = [
         item.investmentName || '',
         item.notes || '',
-        item.type === 'bank_transfer'
-          ? item.direction === 'out'
-            ? 'Bank transfer out'
-            : 'Bank transfer in'
-          : EVENT_LABELS[item.type] || item.type,
+        item.marketTransactionType === 'buy'
+          ? 'Purchase buy'
+          : item.marketTransactionType === 'sell'
+            ? 'Sale redemption'
+            : item.type === 'bank_transfer'
+              ? item.direction === 'out' ? 'Bank transfer out' : 'Bank transfer in'
+              : EVENT_LABELS[item.type] || item.type,
       ]
         .join(' ')
         .toLowerCase();
@@ -395,11 +397,13 @@ export default function InvestmentLedgerScreen() {
 
                   <View style={styles.entryCopy}>
                     <Text style={styles.entryTitle}>
-                      {item.type === 'bank_transfer'
-                        ? item.direction === 'out'
-                          ? 'Bank transfer out'
-                          : 'Bank transfer in'
-                        : EVENT_LABELS[item.type] || 'Portfolio activity'}
+                      {item.marketTransactionType === 'buy'
+                        ? 'Purchase / buy'
+                        : item.marketTransactionType === 'sell'
+                          ? 'Sale / redemption'
+                          : item.type === 'bank_transfer'
+                            ? item.direction === 'out' ? 'Bank transfer out' : 'Bank transfer in'
+                            : EVENT_LABELS[item.type] || 'Portfolio activity'}
                     </Text>
 
                     <Text style={styles.entryAsset}>
@@ -435,12 +439,17 @@ export default function InvestmentLedgerScreen() {
                           currency,
                         )}
                       </Text>
+                    ) : item.marketTransactionType ? (
+                      <>
+                        <Text style={styles.entrySub}>
+                          {Math.abs(Number(item.quantity || 0)).toLocaleString('en-IN', { maximumFractionDigits: 6 })} {item.assetClass === 'stock' ? 'shares' : 'units'} · ₹{Number(item.unitPrice || 0).toLocaleString('en-IN', { maximumFractionDigits: 4 })}
+                        </Text>
+                        {item.marketTransactionType === 'sell' ? (
+                          <Text style={styles.entrySub}>Realized P&L ₹{(Number(item.realizedGainLossInPaise || 0) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</Text>
+                        ) : null}
+                      </>
                     ) : item.type === 'bank_transfer' ? (
-                      <Text style={styles.entrySub}>
-                        {item.direction === 'out'
-                          ? 'Bank outflow'
-                          : 'Bank inflow'}
-                      </Text>
+                      <Text style={styles.entrySub}>{item.direction === 'out' ? 'Bank outflow' : 'Bank inflow'}</Text>
                     ) : null}
                   </View>
                 </TouchableOpacity>

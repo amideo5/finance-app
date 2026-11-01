@@ -13,7 +13,7 @@ import {
   addContributionInterval,
   calculateAccruedValueInPaise,
   calculateEstimatedDailyGrowthInPaise,
-  getNextContributionSchedule,
+  getNextUnprocessedContributionSchedule,
   isValidDateKey,
   toDateKey,
 } from "../calculations/investmentGrowth";
@@ -21,6 +21,14 @@ import {
   fetchLatestInvestmentPrice,
   hasStockMarketApiKey,
 } from "../marketData/investmentPrices";
+import {
+  calculateInitialFundingDebitInPaise,
+  calculateMarketBuy,
+  calculateMarketPositionValueInPaise,
+  calculateMarketSell,
+  calculateXirrPercent,
+  isMarketAssetClass,
+} from "../calculations/marketInvestmentAccounting";
 
 const ASSET_CLASSES = new Set([
   "fixed_deposit",
@@ -71,6 +79,30 @@ const ledgerCollection = (profileId, investmentId) =>
   );
 
 const todayKey = () => toDateKey();
+
+const assertInvestmentDate = (date, label = "transaction date") => {
+  if (!isValidDateKey(date)) throw new Error(`Enter a valid ${label} in YYYY-MM-DD format.`);
+  if (date > todayKey()) throw new Error(`${label[0].toUpperCase()}${label.slice(1)} cannot be in the future.`);
+};
+
+const assertChronologicalMarketTransaction = (asset, date, ledgerDocs) => {
+  if (!isMarketAssetClass(asset?.assetClass)) return;
+  const marketDates = ledgerDocs
+    .map((entry) => entry.data())
+    .filter((entry) => (
+      entry.marketTransactionType === "buy" ||
+      entry.marketTransactionType === "sell" ||
+      (entry.type === "opening_balance" && isMarketAssetClass(entry.assetClass)) ||
+      (entry.type === "bank_transfer" && (entry.direction === "in" || entry.direction === "out"))
+    ))
+    .map((entry) => entry.date)
+    .filter(isValidDateKey)
+    .sort();
+  const latestMarketDate = marketDates[marketDates.length - 1];
+  if (latestMarketDate && date < latestMarketDate) {
+    throw new Error(`Record stock and mutual-fund purchases/sales in date order. The latest recorded market transaction is ${latestMarketDate}; backdated transactions need a full ledger replay and are not supported yet.`);
+  }
+};
 
 /**
  * IMPORTANT:
@@ -232,13 +264,30 @@ const processDueRecurringContributions = async (profileId, userId) => {
       !Number.isSafeInteger(initial.recurringContributionAmountInPaise) ||
       initial.recurringContributionAmountInPaise <= 0 ||
       !isValidDateKey(initial.startDate) ||
-      !isValidDateKey(initial.nextContributionDate) ||
       !CONTRIBUTION_FREQUENCIES.has(initial.contributionFrequency)
     ) continue;
 
-    let expectedDate = initial.nextContributionDate;
+    const assetRef = doc(investmentCollection(profileId), assetDoc.id);
+    // Rebuild the schedule cursor from the last successfully posted installment.
+    // Older app versions initialized nextContributionDate as the first date
+    // AFTER today, which skipped every overdue date for a backdated RD.
+    const firstUnprocessed = getNextUnprocessedContributionSchedule(
+      initial.startDate,
+      initial.contributionFrequency,
+      initial.lastContributionDate || null,
+    );
+    let expectedDate = firstUnprocessed.date;
+    if (initial.nextContributionDate !== expectedDate || Number(initial.nextContributionIndex || 0) !== firstUnprocessed.index) {
+      await updateDoc(assetRef, {
+        nextContributionDate: expectedDate,
+        nextContributionIndex: firstUnprocessed.index,
+        recurringContributionStatus: expectedDate <= today ? "catching_up" : "active",
+        recurringContributionError: null,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
     if (initial.maturityDate && isValidDateKey(initial.maturityDate) && expectedDate > initial.maturityDate) {
-      const assetRef = doc(investmentCollection(profileId), assetDoc.id);
       await updateDoc(assetRef, {
         recurringContributionEnabled: false,
         recurringContributionStatus: "matured",
@@ -248,7 +297,9 @@ const processDueRecurringContributions = async (profileId, userId) => {
       continue;
     }
     let iterations = 0;
-    while (expectedDate <= today && iterations < 48) {
+    // A safety ceiling prevents a very old schedule from blocking app startup.
+    // Any remaining dates stay due and are picked up on the next portfolio read.
+    while (expectedDate <= today && iterations < 600) {
       const result = await applyScheduledContribution(
         profileId,
         userId,
@@ -256,16 +307,22 @@ const processDueRecurringContributions = async (profileId, userId) => {
         expectedDate,
         assetSnapshot.docs,
       );
-      if (result === "insufficient" || result === "invalid_account" || result === "future") break;
+      if (result === "insufficient" || result === "invalid_account" || result === "future" || result === "missing") break;
       iterations += 1;
 
-      // Re-read the holding so concurrent clients and schedule edits are respected.
-      const latest = await getDocs(investmentCollection(profileId));
-      const latestDoc = latest.docs.find((item) => item.id === assetDoc.id);
-      if (!latestDoc) break;
-      const latestData = latestDoc.data();
+      // Re-read only this holding so concurrent clients and schedule edits are respected.
+      const latestSnapshot = await getDoc(assetRef);
+      if (!latestSnapshot.exists()) break;
+      const latestData = latestSnapshot.data();
       if (latestData.recurringContributionEnabled !== true || !isValidDateKey(latestData.nextContributionDate)) break;
       expectedDate = latestData.nextContributionDate;
+    }
+    if (expectedDate <= today && iterations >= 600) {
+      await updateDoc(assetRef, {
+        recurringContributionStatus: "catching_up",
+        recurringContributionError: "Older installments remain queued and will be processed on the next portfolio refresh.",
+        updatedAt: serverTimestamp(),
+      });
     }
   }
 };
@@ -310,6 +367,7 @@ const applyScheduledContribution = async (profileId, userId, investmentId, dueDa
     // Recover safely if a legacy/partial migration already contains the dated row.
     if (ledgerSnapshot.exists()) {
       transaction.update(assetRef, {
+        lastContributionDate: dueDate,
         nextContributionDate: maturedAfterThisPayment ? null : nextDate,
         nextContributionIndex: nextIndex,
         recurringContributionEnabled: !maturedAfterThisPayment,
@@ -369,7 +427,19 @@ const applyScheduledContribution = async (profileId, userId, investmentId, dueDa
 
     if (accountRef && account) {
       const balanceInPaise = readPaise(account, "balanceInPaise", "balance");
-      if (!mainTransactionSnapshot?.exists()) {
+      const existingTransfer = mainTransactionSnapshot?.exists() ? mainTransactionSnapshot.data() : null;
+      const transferAlreadyApplied = Boolean(
+        existingTransfer && existingTransfer.investmentLedgerEntryId === ledgerRef.id,
+      );
+      if (existingTransfer && !transferAlreadyApplied) {
+        transaction.update(assetRef, {
+          recurringContributionError: "A transaction with this installment ID already exists but does not match the RD ledger. Review this installment before retrying.",
+          recurringContributionLastAttemptDate: todayKey(),
+          updatedAt: serverTimestamp(),
+        });
+        return "invalid_account";
+      }
+      if (!transferAlreadyApplied) {
         transaction.set(mainTransactionRef, {
           profileId,
           userId,
@@ -396,11 +466,13 @@ const applyScheduledContribution = async (profileId, userId, investmentId, dueDa
           updatedAt: serverTimestamp(),
         });
       }
-      transaction.update(accountRef, {
-        balance: (balanceInPaise - amountInPaise) / 100,
-        balanceInPaise: balanceInPaise - amountInPaise,
-        updatedAt: serverTimestamp(),
-      });
+      if (!transferAlreadyApplied) {
+        transaction.update(accountRef, {
+          balance: (balanceInPaise - amountInPaise) / 100,
+          balanceInPaise: balanceInPaise - amountInPaise,
+          updatedAt: serverTimestamp(),
+        });
+      }
       transaction.set(ledgerRef, {
         investmentId,
         investmentName: asset.name || "Recurring Deposit",
@@ -446,18 +518,22 @@ const recordMarketValuation = async (profileId, investmentId, holding, quote) =>
   const assetRef = doc(investmentCollection(profileId), investmentId);
   const runDate = todayKey();
   const ledgerRef = doc(ledgerCollection(profileId, investmentId), `market_${runDate.replace(/-/g, "")}`);
-  const currentValueInPaise = Math.round(Number(holding.units) * quote.price * 100);
-  if (!Number.isSafeInteger(currentValueInPaise) || currentValueInPaise < 0) return false;
 
   return runTransaction(db, async (transaction) => {
     const assetSnapshot = await transaction.get(assetRef);
     if (!assetSnapshot.exists()) return false;
     const asset = assetSnapshot.data();
+    const units = Number(asset.units);
+    if (!Number.isFinite(units) || units <= 0) return false;
+    const currentValueInPaise = calculateMarketPositionValueInPaise(units, quote.price);
     const ledgerSnapshot = await transaction.get(ledgerRef);
+    if (asset.lastMarketPriceDate && asset.lastMarketPriceDate > quote.date) {
+      transaction.update(assetRef, { lastMarketRefreshDate: runDate, updatedAt: serverTimestamp() });
+      return false;
+    }
     if (asset.lastMarketPriceDate === quote.date && Number(asset.lastMarketPrice) === quote.price) {
       transaction.update(assetRef, {
         lastMarketRefreshDate: runDate,
-        lastMarketPriceDate: quote.date,
         marketDataLabel: quote.label,
         updatedAt: serverTimestamp(),
       });
@@ -481,6 +557,7 @@ const recordMarketValuation = async (profileId, investmentId, holding, quote) =>
         lastMarketRefreshDate: runDate,
         marketDataProvider: quote.provider,
         marketDataLabel: quote.label,
+        lastMarketPriceSource: quote.provider,
         lastValuationDate: quote.date,
         updatedAt: serverTimestamp(),
       },
@@ -573,15 +650,50 @@ export const addInvestment = async (profileId, data) => {
   const name = String(data.name || "").trim();
   if (!name) throw new Error("Enter an investment name.");
 
-  const investedAmountInPaise = Number.isSafeInteger(data.investedAmountInPaise)
+  let investedAmountInPaise = Number.isSafeInteger(data.investedAmountInPaise)
     ? data.investedAmountInPaise
     : toPaise(data.investedAmount);
-  const currentValueInPaise = Number.isSafeInteger(data.currentValueInPaise)
+  let currentValueInPaise = Number.isSafeInteger(data.currentValueInPaise)
     ? data.currentValueInPaise
     : toPaise(data.currentValue ?? data.investedAmount);
 
-  const startDate = data.startDate || data.date || todayKey();
-  if (!isValidDateKey(startDate)) throw new Error("Enter the start date in YYYY-MM-DD format.");
+  const requestedStartDate = data.startDate || data.date || todayKey();
+  assertInvestmentDate(requestedStartDate, "investment date");
+  if (data.purchasePriceDate) {
+    assertInvestmentDate(data.purchasePriceDate, "purchase price / NAV date");
+  }
+  // When the user asks for an automatic historical reference price on a
+  // weekend/holiday, the price service may select the next trading session.
+  // Record the opening market transaction on that actual available session.
+  const startDate = data.assetClass === "stock" &&
+      data.purchasePriceSource === "alpha_vantage_historical_close" &&
+      typeof data.purchasePriceDate === "string" && data.purchasePriceDate >= requestedStartDate
+    ? data.purchasePriceDate
+    : requestedStartDate;
+  assertInvestmentDate(startDate, "effective stock purchase date");
+  let marketBuy = null;
+  if (isMarketAssetClass(data.assetClass)) {
+    const marketDataId = String(data.marketDataId || '').trim();
+    if (!marketDataId) {
+      throw new Error(data.assetClass === 'stock'
+        ? 'Enter the stock exchange ticker to enable automatic price tracking.'
+        : 'Select the mutual-fund scheme code to enable automatic NAV tracking.');
+    }
+    if (data.assetClass === 'mutual_fund' && !/^\d+$/.test(marketDataId)) {
+      throw new Error('Mutual-fund provider ID must be the numeric MFAPI scheme code.');
+    }
+    marketBuy = calculateMarketBuy({
+      assetClass: data.assetClass,
+      budgetInPaise: investedAmountInPaise,
+      unitPrice: Number(data.purchasePrice ?? data.averageBuyPrice),
+      quantity: data.units == null || data.units === "" ? null : Number(data.units),
+      chargesInPaise: Number(data.transactionChargesInPaise || 0),
+    });
+    investedAmountInPaise = marketBuy.totalCostInPaise;
+    // Until the first provider quote is fetched, use the acquisition value as
+    // the provisional mark. Never label the purchase price as a live quote.
+    currentValueInPaise = marketBuy.tradeValueInPaise;
+  }
 
   const isRd = data.assetClass === "recurring_deposit";
   const isTermDeposit = TERM_ASSET_CLASSES.has(data.assetClass);
@@ -621,13 +733,48 @@ export const addInvestment = async (profileId, data) => {
   }
 
   const initialSchedule = wantsScheduledContributions
-    ? getNextContributionSchedule(startDate, contributionFrequency, todayKey())
+    ? getNextUnprocessedContributionSchedule(startDate, contributionFrequency, null)
     : null;
   const scheduleFitsTenure = !maturityDate || !initialSchedule || initialSchedule.date <= maturityDate;
   const recurringContributionEnabled = wantsScheduledContributions && scheduleFitsTenure;
   const nextContributionDate = recurringContributionEnabled ? initialSchedule.date : null;
-  const assetRef = doc(investmentCollection(profileId));
-  const ledgerRef = doc(ledgerCollection(profileId, assetRef.id));
+
+  // When an investment is created from Transfer In, use deterministic document
+  // IDs so a retry after a network timeout cannot create a second holding or
+  // debit the source account twice.
+  const fundingAccountId = String(data.fundingAccountId || '').trim() || null;
+  const fundingOperationId = fundingAccountId
+    ? String(data.fundingOperationId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)
+    : '';
+  if (fundingAccountId && !data.fundingUserId) {
+    throw new Error('Sign in is required to fund a new investment from a bank account.');
+  }
+  if (fundingAccountId && !fundingOperationId) {
+    throw new Error('A funding operation ID is required. Please retry creating the investment.');
+  }
+  if (fundingAccountId && (!Number.isSafeInteger(investedAmountInPaise) || investedAmountInPaise <= 0)) {
+    throw new Error('Enter an initial investment amount greater than zero when funding from a bank account.');
+  }
+
+  const assetRef = fundingAccountId
+    ? doc(investmentCollection(profileId), `fund_${fundingOperationId}`)
+    : doc(investmentCollection(profileId));
+  const ledgerRef = fundingAccountId
+    ? doc(ledgerCollection(profileId, assetRef.id), `opening_${fundingOperationId}`)
+    : doc(ledgerCollection(profileId, assetRef.id));
+  const mainTransactionRef = fundingAccountId
+    ? doc(collection(db, 'profiles', profileId, 'transactions'), `investment_create_${fundingOperationId}`)
+    : null;
+  const fundingAccountRef = fundingAccountId
+    ? doc(db, 'profiles', profileId, 'accounts', fundingAccountId)
+    : null;
+  const fundingDebitInPaise = fundingAccountId
+    ? calculateInitialFundingDebitInPaise({
+        assetClass: data.assetClass,
+        initialPrincipalInPaise: investedAmountInPaise,
+        marketPurchase: marketBuy,
+      })
+    : 0;
   const snapshotRef = doc(snapshotCollection(profileId));
   const date = startDate;
 
@@ -638,6 +785,9 @@ export const addInvestment = async (profileId, data) => {
       assetClass: data.assetClass,
       currency: data.currency || "INR",
       startDate,
+      requestedInvestmentDate: requestedStartDate !== startDate ? requestedStartDate : null,
+      purchasePriceDate: marketBuy ? (data.purchasePriceDate || startDate) : null,
+      purchasePriceSource: marketBuy ? (data.purchasePriceSource || "manual_reference") : null,
       annualInterestRatePercent,
       compoundingFrequency: isTermDeposit ? compoundingFrequency : null,
       tenureMonths,
@@ -646,12 +796,21 @@ export const addInvestment = async (profileId, data) => {
       recurringContributionAmount: wantsScheduledContributions ? recurringContributionAmountInPaise / 100 : 0,
       contributionFrequency: isRd ? contributionFrequency : null,
       recurringContributionSourceAccountId: wantsScheduledContributions ? (data.recurringContributionSourceAccountId || null) : null,
+      ...(fundingAccountId ? {
+        initialFundingSource: 'bank_account',
+        initialFundingAccountId: fundingAccountId,
+      } : {}),
       recurringContributionEnabled,
       recurringContributionStatus: recurringContributionEnabled ? "active" : (wantsScheduledContributions ? "matured" : "not_configured"),
       recurringContributionError: null,
       nextContributionDate,
       nextContributionIndex: recurringContributionEnabled ? initialSchedule.index : 0,
-      marketDataId: MARKET_ASSET_CLASSES.has(data.assetClass) ? (String(data.marketDataId || "").trim() || null) : null,
+      marketDataId: MARKET_ASSET_CLASSES.has(data.assetClass) ? String(data.marketDataId || "").trim() : null,
+      units: marketBuy ? marketBuy.quantity : data.units ?? null,
+      averageBuyPrice: marketBuy ? (marketBuy.totalCostInPaise / 100) / marketBuy.quantity : null,
+      purchaseUnitPrice: marketBuy ? marketBuy.unitPrice : null,
+      transactionChargesInPaise: marketBuy ? marketBuy.chargesInPaise : 0,
+      marketAssetAccountingVersion: marketBuy ? 2 : null,
       marketDataProvider: data.assetClass === "mutual_fund"
         ? "mfapi"
         : data.assetClass === "stock"
@@ -666,27 +825,126 @@ export const addInvestment = async (profileId, data) => {
 
   delete storedAsset.date;
   delete storedAsset.id;
+  delete storedAsset.fundingUserId;
+  delete storedAsset.fundingOperationId;
+  delete storedAsset.fundingAccountId;
 
   const existingAssets = await getDocs(investmentCollection(profileId));
+  let createdInvestmentId = assetRef.id;
   await runTransaction(db, async (transaction) => {
+    // Read all documents before writing. An existing deterministic transfer row
+    // means an earlier attempt committed and its response was lost; return it.
+    if (mainTransactionRef) {
+      const previousTransfer = await transaction.get(mainTransactionRef);
+      if (previousTransfer.exists()) {
+        createdInvestmentId = String(previousTransfer.data().investmentId || assetRef.id);
+        return;
+      }
+      const conflictingAsset = await transaction.get(assetRef);
+      if (conflictingAsset.exists()) {
+        throw new Error('A conflicting investment record already exists for this funding operation. Return to the portfolio and refresh before retrying.');
+      }
+    }
+
+    let fundingAccount = null;
+    if (fundingAccountRef) {
+      const accountSnapshot = await transaction.get(fundingAccountRef);
+      if (!accountSnapshot.exists()) throw new Error('The selected bank account no longer exists.');
+      fundingAccount = accountSnapshot.data();
+      if (String(fundingAccount.type || '').toLowerCase() !== 'bank') {
+        throw new Error('Choose a tracked bank account as the funding source.');
+      }
+      const availableInPaise = readPaise(fundingAccount, 'balanceInPaise', 'balance');
+      if (!Number.isSafeInteger(availableInPaise) || availableInPaise < fundingDebitInPaise) {
+        throw new Error(`Insufficient balance in ${fundingAccount.name || 'the selected account'}. Available ₹${(availableInPaise / 100).toLocaleString('en-IN')}, required ₹${(fundingDebitInPaise / 100).toLocaleString('en-IN')}.`);
+      }
+      const nextBalanceInPaise = availableInPaise - fundingDebitInPaise;
+      transaction.update(fundingAccountRef, {
+        balance: nextBalanceInPaise / 100,
+        balanceInPaise: nextBalanceInPaise,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
     transaction.set(assetRef, storedAsset);
-    const openingAmountInPaise = isTermDeposit ? investedAmountInPaise : currentValueInPaise;
+    const openingAmountInPaise = fundingAccountId
+      ? fundingDebitInPaise
+      : (isTermDeposit || marketBuy ? investedAmountInPaise : currentValueInPaise);
     transaction.set(ledgerRef, {
       investmentId: assetRef.id,
       investmentName: name,
       assetClass: data.assetClass,
-      type: "opening_balance",
+      type: fundingAccountId ? 'bank_transfer' : 'opening_balance',
+      ...(fundingAccountId ? { direction: 'in' } : {}),
       amountInPaise: openingAmountInPaise,
       amount: openingAmountInPaise / 100,
       newValueInPaise: currentValueInPaise,
+      ...(marketBuy ? {
+        marketTransactionType: "buy",
+        quantity: marketBuy.quantity,
+        unitPrice: marketBuy.unitPrice,
+        tradeValueInPaise: marketBuy.tradeValueInPaise,
+        costBasisChangeInPaise: marketBuy.totalCostInPaise,
+        transactionChargesInPaise: marketBuy.chargesInPaise,
+        unspentBudgetInPaise: marketBuy.unspentBudgetInPaise,
+        unitPriceDate: data.purchasePriceDate || startDate,
+        unitPriceSource: data.purchasePriceSource || "manual_reference",
+      } : {}),
+      ...(fundingAccountId ? {
+        accountId: fundingAccountId,
+        sourceAccountId: fundingAccountId,
+        sourceAccountName: fundingAccount?.name || 'Bank account',
+        mainTransactionId: mainTransactionRef.id,
+        transferId: mainTransactionRef.id,
+        fundingSource: 'bank_account',
+      } : {}),
       date,
-      notes: isTermDeposit ? "Opening principal for accrued-value calculation" : "Opening portfolio value",
+      notes: String(data.notes || '').trim() || (fundingAccountId
+        ? `Initial funding from ${fundingAccount?.name || 'bank account'}`
+        : (isTermDeposit ? "Opening principal for accrued-value calculation" : marketBuy
+          ? (data.purchasePriceSource === "alpha_vantage_historical_close"
+            ? "Opening stock purchase · historical daily closing-price reference"
+            : data.purchasePriceSource === "mfapi_historical_nav"
+              ? "Opening mutual-fund purchase · historical NAV reference"
+              : data.purchasePriceSource === "amc_allotment_statement"
+                ? "Opening mutual-fund purchase · AMC allotment NAV"
+                : "Opening stock/fund purchase · broker or statement execution price")
+          : "Opening portfolio value")),
       createdAt: serverTimestamp(),
     });
-    writeSnapshot(transaction, snapshotRef, date, existingAssets.docs, assetRef.id, storedAsset);
+
+    if (mainTransactionRef) {
+      transaction.set(mainTransactionRef, {
+        profileId,
+        userId: data.fundingUserId,
+        type: 'expense',
+        kind: 'investment-transfer',
+        amount: fundingDebitInPaise / 100,
+        amountInPaise: fundingDebitInPaise,
+        categoryId: 'investment-transfer',
+        category: 'Investment Transfer',
+        categoryIcon: '📈',
+        paymentMode: 'bank transfer',
+        accountId: fundingAccountId,
+        notes: `Initial funding for ${name}`,
+        date: todayKey(),
+        investmentEffectiveDate: date,
+        currency: data.currency || 'INR',
+        investmentTransferId: mainTransactionRef.id,
+        investmentTransferDirection: 'in',
+        investmentLedgerEntryId: ledgerRef.id,
+        investmentId: assetRef.id,
+        investmentName: name,
+        assetClass: data.assetClass,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    writeSnapshot(transaction, snapshotRef, todayKey(), existingAssets.docs, assetRef.id, storedAsset);
   });
 
-  return assetRef.id;
+  return createdInvestmentId;
 };
 
 /**
@@ -697,6 +955,8 @@ export const getInvestmentPortfolio = async (profileId) => {
     return {
       investments: [], transactions: [], snapshots: [],
       totalValueInPaise: 0, totalInvestedInPaise: 0,
+      totalRealizedGainLossInPaise: 0, totalUnrealizedGainLossInPaise: 0, totalReturnInPaise: 0,
+      portfolioXirrPercent: null,
     };
   }
 
@@ -785,10 +1045,38 @@ export const getInvestmentPortfolio = async (profileId) => {
         frequency,
       );
     }
+    const unrealizedGainLossInPaise = effectiveValue - holding.investedAmountInPaise;
+    const realizedGainLossInPaise = Math.round(Number(holding.realizedGainLossInPaise || 0));
+    const marketCashFlows = holdingTransactions.flatMap((entry) => {
+      if (entry.type === "opening_balance") {
+        const cost = Number.isSafeInteger(entry.costBasisChangeInPaise)
+          ? entry.costBasisChangeInPaise
+          : Math.abs(readPaise(entry, "amountInPaise", "amount"));
+        return cost > 0 ? [{ date: entry.date, amountInPaise: -cost }] : [];
+      }
+      if (entry.marketTransactionType === "buy") {
+        const cost = Number.isSafeInteger(entry.costBasisChangeInPaise)
+          ? entry.costBasisChangeInPaise
+          : Math.abs(readPaise(entry, "amountInPaise", "amount"));
+        return cost > 0 ? [{ date: entry.date, amountInPaise: -cost }] : [];
+      }
+      if (entry.marketTransactionType === "sell") {
+        const proceeds = Math.abs(readPaise(entry, "amountInPaise", "amount"));
+        return proceeds > 0 ? [{ date: entry.date, amountInPaise: proceeds }] : [];
+      }
+      return [];
+    });
+    const xirrPercent = isMarketAssetClass(holding.assetClass)
+      ? calculateXirrPercent(marketCashFlows, today, effectiveValue)
+      : null;
     return {
       ...holding,
       currentValueInPaise: effectiveValue,
       currentValue: effectiveValue / 100,
+      unrealizedGainLossInPaise,
+      realizedGainLossInPaise,
+      totalReturnInPaise: unrealizedGainLossInPaise + realizedGainLossInPaise,
+      xirrPercent,
       estimatedDailyGrowthInPaise: dailyGrowth,
       estimatedDailyGrowth: dailyGrowth / 100,
       projectedMaturityValueInPaise,
@@ -842,12 +1130,30 @@ export const getInvestmentPortfolio = async (profileId) => {
   const snapshots = [...snapshotsByDate.values()]
     .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
 
+  const portfolioCashFlows = transactions.flatMap((entry) => {
+    const amount = Math.abs(readPaise(entry, "amountInPaise", "amount"));
+    if (!amount) return [];
+    if (entry.type === "opening_balance" || entry.type === "contribution" || (entry.type === "bank_transfer" && entry.direction === "in")) {
+      return [{ date: entry.date, amountInPaise: -amount }];
+    }
+    if (entry.type === "withdrawal" || (entry.type === "bank_transfer" && entry.direction === "out")) {
+      return [{ date: entry.date, amountInPaise: amount }];
+    }
+    return [];
+  });
+  const totalValueInPaise = enrichedInvestments.reduce((sum, item) => sum + item.currentValueInPaise, 0);
+  const portfolioXirrPercent = calculateXirrPercent(portfolioCashFlows, today, totalValueInPaise);
+
   return {
     investments: enrichedInvestments,
     transactions,
     snapshots,
-    totalValueInPaise: enrichedInvestments.reduce((sum, item) => sum + item.currentValueInPaise, 0),
+    totalValueInPaise,
     totalInvestedInPaise: enrichedInvestments.reduce((sum, item) => sum + item.investedAmountInPaise, 0),
+    totalRealizedGainLossInPaise: enrichedInvestments.reduce((sum, item) => sum + item.realizedGainLossInPaise, 0),
+    totalUnrealizedGainLossInPaise: enrichedInvestments.reduce((sum, item) => sum + item.unrealizedGainLossInPaise, 0),
+    totalReturnInPaise: enrichedInvestments.reduce((sum, item) => sum + item.totalReturnInPaise, 0),
+    portfolioXirrPercent,
   };
 };
 
@@ -859,7 +1165,7 @@ export const updateInvestmentSettings = async (profileId, investmentId, settings
   const openingDoc = existingLedger.docs.find((item) => item.data()?.type === "opening_balance");
 
   const startDate = settings.startDate || todayKey();
-  if (!isValidDateKey(startDate)) throw new Error("Enter the start date in YYYY-MM-DD format.");
+  assertInvestmentDate(startDate, "investment start date");
   const assetSnapshot = await getDocs(investmentCollection(profileId));
   const observed = assetSnapshot.docs.find((item) => item.id === investmentId)?.data();
   if (!observed) throw new Error("This investment no longer exists.");
@@ -893,7 +1199,11 @@ export const updateInvestmentSettings = async (profileId, investmentId, settings
     && observed.contributionFrequency === contributionFrequency
     && isValidDateKey(observed.nextContributionDate);
   const recalculatedSchedule = enabled && !sameActiveSchedule
-    ? getNextContributionSchedule(startDate, contributionFrequency, todayKey())
+    ? getNextUnprocessedContributionSchedule(
+      startDate,
+      contributionFrequency,
+      observed.lastContributionDate || null,
+    )
     : null;
   const proposedNextDate = enabled
     ? (sameActiveSchedule ? observed.nextContributionDate : recalculatedSchedule.date)
@@ -943,20 +1253,26 @@ export const updateInvestmentSettings = async (profileId, investmentId, settings
       } : {}),
       updatedAt: serverTimestamp(),
     };
-    const currentOpening = isTermDeposit && openingDoc
+    const currentOpening = (isTermDeposit || isMarketAsset) && openingDoc
       ? await transaction.get(openingDoc.ref)
       : null;
     transaction.update(assetRef, update);
 
-    if (isTermDeposit && openingDoc && currentOpening?.exists()) {
-      const principal = readPaise(current, "investedAmountInPaise", "investedAmount");
-      transaction.update(openingDoc.ref, {
-        date: startDate,
-        amountInPaise: principal,
-        amount: principal / 100,
-        newValueInPaise: readPaise(current, "currentValueInPaise", "currentValue"),
-        notes: "Opening principal for accrued-value calculation",
-      });
+    if (openingDoc && currentOpening?.exists()) {
+      if (isTermDeposit) {
+        const principal = readPaise(current, "investedAmountInPaise", "investedAmount");
+        transaction.update(openingDoc.ref, {
+          date: startDate,
+          amountInPaise: principal,
+          amount: principal / 100,
+          newValueInPaise: readPaise(current, "currentValueInPaise", "currentValue"),
+          notes: "Opening principal for accrued-value calculation",
+        });
+      } else if (isMarketAsset) {
+        // Keep the original transaction amount/quantity intact; only correct
+        // the opening trade date when the holding's start date is edited.
+        transaction.update(openingDoc.ref, { date: startDate });
+      }
     }
   });
   return true;
@@ -1006,6 +1322,7 @@ export const recordInvestmentActivity = async (
   const ledgerRef = doc(ledgerCollection(profileId, investmentId));
   const snapshotRef = doc(snapshotCollection(profileId));
   const date = data.date || todayKey();
+  assertInvestmentDate(date);
 
   // FIX: The collection query is separate from the Firestore transaction.
   const existingAssets = await getDocs(investmentCollection(profileId));
@@ -1019,6 +1336,9 @@ export const recordInvestmentActivity = async (
     }
 
     const asset = assetSnapshot.data();
+    if (isMarketAssetClass(asset.assetClass) && ["contribution", "withdrawal"].includes(data.type)) {
+      throw new Error("For stocks and mutual funds, record a buy or sale through Transfer in / Transfer out so units and cost basis are updated.");
+    }
     const oldValue = readPaise(
       asset,
       "currentValueInPaise",
@@ -1105,7 +1425,7 @@ export const recordInvestmentActivity = async (
     writeSnapshot(
       transaction,
       snapshotRef,
-      date,
+      todayKey(),
       existingAssets.docs,
       investmentId,
       updatedAsset,
@@ -1116,116 +1436,121 @@ export const recordInvestmentActivity = async (
 };
 
 /**
- * Redeem investment value into a linked bank account.
+ * Sell/redeem an investment into a linked bank account. For market assets,
+ * units and cost basis are updated at the execution price; the cash proceeds
+ * are deliberately not treated as a reduction of cost basis.
  */
-export const transferFromInvestment = async (
-  profileId,
-  userId,
-  data,
-) => {
+export const transferFromInvestment = async (profileId, userId, data) => {
   if (!profileId || !userId || !data.investmentId || !data.accountId) {
     throw new Error("Choose an investment and destination bank account first.");
   }
 
-  const amountInPaise = Number.isSafeInteger(data.amountInPaise)
+  const requestedAmountInPaise = Number.isSafeInteger(data.amountInPaise)
     ? data.amountInPaise
     : toPaise(data.amount);
-
-  if (!Number.isSafeInteger(amountInPaise) || amountInPaise <= 0) {
+  if (!Number.isSafeInteger(requestedAmountInPaise) || requestedAmountInPaise <= 0) {
     throw new Error("Transfer amount must be positive.");
   }
 
-  const accountRef = doc(
-    db,
-    "profiles",
-    profileId,
-    "accounts",
-    data.accountId,
-  );
-
-  const mainTransactionRef = doc(
-    collection(db, "profiles", profileId, "transactions"),
-  );
-
-  const assetRef = doc(
-    db,
-    "profiles",
-    profileId,
-    "investments",
-    data.investmentId,
-  );
-
+  const accountRef = doc(db, "profiles", profileId, "accounts", data.accountId);
+  const mainTransactionRef = doc(collection(db, "profiles", profileId, "transactions"));
+  const assetRef = doc(db, "profiles", profileId, "investments", data.investmentId);
   const ledgerRef = doc(ledgerCollection(profileId, data.investmentId));
   const snapshotRef = doc(snapshotCollection(profileId));
   const date = data.date || todayKey();
+  assertInvestmentDate(date);
+  if (data.unitPriceDate) assertInvestmentDate(data.unitPriceDate, "purchase price / NAV date");
   const transferId = mainTransactionRef.id;
-
-  // FIX: Fetch the collection outside the transaction.
   const existingAssets = await getDocs(investmentCollection(profileId));
+  const existingLedgerSnapshot = await getDocs(ledgerCollection(profileId, data.investmentId));
 
+  let result = null;
   await runTransaction(db, async (transaction) => {
     const accountSnapshot = await transaction.get(accountRef);
     const assetSnapshot = await transaction.get(assetRef);
-
-    if (!accountSnapshot.exists()) {
-      throw new Error("The selected bank account no longer exists.");
-    }
-
-    if (!assetSnapshot.exists()) {
-      throw new Error("The selected investment no longer exists.");
-    }
+    if (!accountSnapshot.exists()) throw new Error("The selected bank account no longer exists.");
+    if (!assetSnapshot.exists()) throw new Error("The selected investment no longer exists.");
 
     const account = accountSnapshot.data();
     const asset = assetSnapshot.data();
-
     if (String(account.type || "").toLowerCase() !== "bank") {
       throw new Error("Choose a linked bank account as the destination.");
     }
+    if (isValidDateKey(asset.startDate) && date < asset.startDate) {
+      throw new Error("The transaction date cannot be earlier than this investment's start date.");
+    }
+    assertChronologicalMarketTransaction(asset, date, existingLedgerSnapshot.docs);
 
-    const currentValueInPaise = readPaise(
-      asset,
-      "currentValueInPaise",
-      "currentValue",
-    );
+    const oldValueInPaise = readPaise(asset, "currentValueInPaise", "currentValue");
+    const oldInvestedInPaise = readPaise(asset, "investedAmountInPaise", "investedAmount");
+    let cashAmountInPaise = requestedAmountInPaise;
+    let updatedAsset;
+    let marketSale = null;
 
-    if (amountInPaise > currentValueInPaise) {
-      throw new Error(
-        "Withdrawal cannot exceed the investment's current value.",
+    if (isMarketAssetClass(asset.assetClass)) {
+      const executionPrice = Number(data.unitPrice || asset.lastMarketPrice || asset.averageBuyPrice);
+      marketSale = calculateMarketSell({
+        assetClass: asset.assetClass,
+        requestedProceedsInPaise,
+        unitPrice: executionPrice,
+        heldQuantity: Number(asset.units || 0),
+        costBasisInPaise: oldInvestedInPaise,
+        chargesInPaise: Number(data.transactionChargesInPaise || 0),
+      });
+      cashAmountInPaise = marketSale.netProceedsInPaise;
+      const existingMarketPriceDate = String(asset.lastMarketPriceDate || '');
+      // A dated sale/redemption execution is a better mark when it is at least
+      // as recent as the quote already stored. Never replace a newer quote
+      // with an older historical transaction price.
+      const useExecutionPriceAsMark = !existingMarketPriceDate || date >= existingMarketPriceDate;
+      const referencePrice = useExecutionPriceAsMark
+        ? executionPrice
+        : Number(asset.lastMarketPrice);
+      const newValueInPaise = calculateMarketPositionValueInPaise(
+        marketSale.remainingQuantity,
+        referencePrice,
+      );
+      updatedAsset = withMoneyFields(
+        {
+          ...asset,
+          units: marketSale.remainingQuantity,
+          averageBuyPrice: marketSale.remainingQuantity > 0
+            ? (marketSale.remainingCostBasisInPaise / 100) / marketSale.remainingQuantity
+            : 0,
+          updatedAt: serverTimestamp(),
+          lastWithdrawalDate: date,
+          lastMarketPrice: referencePrice,
+          ...(useExecutionPriceAsMark ? {
+            lastMarketPriceDate: date,
+            lastValuationDate: date,
+            lastMarketPriceSource: 'transaction_execution',
+            marketDataLabel: `Transaction execution · ${date}`,
+          } : {}),
+          realizedGainLossInPaise: Math.round(Number(asset.realizedGainLossInPaise || 0)) + marketSale.realizedGainLossInPaise,
+        },
+        marketSale.remainingCostBasisInPaise,
+        newValueInPaise,
+      );
+    } else {
+      if (requestedAmountInPaise > oldValueInPaise) {
+        throw new Error("Withdrawal cannot exceed the investment's current value.");
+      }
+      updatedAsset = withMoneyFields(
+        { ...asset, updatedAt: serverTimestamp(), lastWithdrawalDate: date },
+        Math.max(0, oldInvestedInPaise - requestedAmountInPaise),
+        oldValueInPaise - requestedAmountInPaise,
       );
     }
 
-    const currentBalanceInPaise = readPaise(
-      account,
-      "balanceInPaise",
-      "balance",
-    );
-
-    if (!Number.isSafeInteger(currentBalanceInPaise)) {
-      throw new Error("The bank account balance is invalid.");
-    }
-
-    const nextBalance = currentBalanceInPaise + amountInPaise;
-
-    const updatedAsset = withMoneyFields(
-      {
-        ...asset,
-        updatedAt: serverTimestamp(),
-        lastWithdrawalDate: date,
-      },
-      Math.max(
-        0,
-        readPaise(asset, "investedAmountInPaise", "investedAmount") -
-          amountInPaise,
-      ),
-      currentValueInPaise - amountInPaise,
-    );
+    const currentBalanceInPaise = readPaise(account, "balanceInPaise", "balance");
+    if (!Number.isSafeInteger(currentBalanceInPaise)) throw new Error("The bank account balance is invalid.");
+    const nextBalance = currentBalanceInPaise + cashAmountInPaise;
 
     transaction.update(accountRef, {
       balance: nextBalance / 100,
       balanceInPaise: nextBalance,
       updatedAt: serverTimestamp(),
     });
-
     transaction.update(assetRef, updatedAsset);
 
     transaction.set(mainTransactionRef, {
@@ -1233,14 +1558,14 @@ export const transferFromInvestment = async (
       userId,
       type: "income",
       kind: "investment-transfer",
-      amount: amountInPaise / 100,
-      amountInPaise,
+      amount: cashAmountInPaise / 100,
+      amountInPaise: cashAmountInPaise,
       categoryId: "investment-withdrawal",
       category: "Investment Withdrawal",
       categoryIcon: "📤",
       paymentMode: "bank transfer",
       accountId: data.accountId,
-      notes: String(data.notes || "").trim() || `Withdrawal from ${asset.name}`,
+      notes: String(data.notes || "").trim() || `${marketSale ? "Sale/redemption from" : "Withdrawal from"} ${asset.name}`,
       date,
       currency: data.currency || "INR",
       investmentTransferId: transferId,
@@ -1259,8 +1584,18 @@ export const transferFromInvestment = async (
       assetClass: asset.assetClass || "other",
       type: "bank_transfer",
       direction: "out",
-      amountInPaise: -amountInPaise,
-      amount: -amountInPaise / 100,
+      amountInPaise: -cashAmountInPaise,
+      amount: -cashAmountInPaise / 100,
+      ...(marketSale ? {
+        marketTransactionType: "sell",
+        quantity: -marketSale.quantity,
+        unitPrice: marketSale.unitPrice,
+        tradeValueInPaise: marketSale.grossProceedsInPaise,
+        transactionChargesInPaise: marketSale.chargesInPaise,
+        costBasisChangeInPaise: -marketSale.costBasisSoldInPaise,
+        realizedGainLossInPaise: marketSale.realizedGainLossInPaise,
+        remainingQuantity: marketSale.remainingQuantity,
+      } : {}),
       accountId: data.accountId,
       destinationAccountId: data.accountId,
       destinationAccountName: account.name || "Bank account",
@@ -1271,132 +1606,128 @@ export const transferFromInvestment = async (
       createdAt: serverTimestamp(),
     });
 
-    writeSnapshot(
-      transaction,
-      snapshotRef,
-      date,
-      existingAssets.docs,
-      data.investmentId,
-      updatedAsset,
-    );
+    writeSnapshot(transaction, snapshotRef, todayKey(), existingAssets.docs, data.investmentId, updatedAsset);
+    result = {
+      transferId,
+      transactionId: transferId,
+      ledgerTransactionId: ledgerRef.id,
+      amountInPaise: cashAmountInPaise,
+      quantity: marketSale?.quantity ?? null,
+      realizedGainLossInPaise: marketSale?.realizedGainLossInPaise ?? null,
+    };
   });
 
-  return {
-    transferId,
-    transactionId: transferId,
-    ledgerTransactionId: ledgerRef.id,
-  };
+  return result;
 };
 
 /**
- * Move money from a linked bank account into an investment.
+ * Buy/invest from a linked bank account. For stocks and mutual funds the
+ * supplied execution price/NAV determines units, trade cost and cost basis.
  */
-export const transferToInvestment = async (
-  profileId,
-  userId,
-  data,
-) => {
+export const transferToInvestment = async (profileId, userId, data) => {
   if (!profileId || !userId || !data.investmentId || !data.accountId) {
     throw new Error("Choose a bank account and investment first.");
   }
 
-  const amountInPaise = Number.isSafeInteger(data.amountInPaise)
+  const budgetInPaise = Number.isSafeInteger(data.amountInPaise)
     ? data.amountInPaise
     : toPaise(data.amount);
-
-  if (!Number.isSafeInteger(amountInPaise) || amountInPaise <= 0) {
+  if (!Number.isSafeInteger(budgetInPaise) || budgetInPaise <= 0) {
     throw new Error("Transfer amount must be positive.");
   }
 
-  const accountRef = doc(
-    db,
-    "profiles",
-    profileId,
-    "accounts",
-    data.accountId,
-  );
-
-  const mainTransactionRef = doc(
-    collection(db, "profiles", profileId, "transactions"),
-  );
-
-  const assetRef = doc(
-    db,
-    "profiles",
-    profileId,
-    "investments",
-    data.investmentId,
-  );
-
+  const accountRef = doc(db, "profiles", profileId, "accounts", data.accountId);
+  const mainTransactionRef = doc(collection(db, "profiles", profileId, "transactions"));
+  const assetRef = doc(db, "profiles", profileId, "investments", data.investmentId);
   const ledgerRef = doc(ledgerCollection(profileId, data.investmentId));
   const snapshotRef = doc(snapshotCollection(profileId));
   const date = data.date || todayKey();
+  assertInvestmentDate(date);
+  if (data.unitPriceDate) assertInvestmentDate(data.unitPriceDate, "purchase price / NAV date");
   const transferId = mainTransactionRef.id;
-
-  // FIX: Query the collection outside the transaction.
   const existingAssets = await getDocs(investmentCollection(profileId));
+  const existingLedgerSnapshot = await getDocs(ledgerCollection(profileId, data.investmentId));
 
+  let result = null;
   await runTransaction(db, async (transaction) => {
     const accountSnapshot = await transaction.get(accountRef);
     const assetSnapshot = await transaction.get(assetRef);
-
-    if (!accountSnapshot.exists()) {
-      throw new Error("The selected bank account no longer exists.");
-    }
-
-    if (!assetSnapshot.exists()) {
-      throw new Error("The selected investment no longer exists.");
-    }
+    if (!accountSnapshot.exists()) throw new Error("The selected bank account no longer exists.");
+    if (!assetSnapshot.exists()) throw new Error("The selected investment no longer exists.");
 
     const account = accountSnapshot.data();
     const asset = assetSnapshot.data();
-
     if (String(account.type || "").toLowerCase() !== "bank") {
       throw new Error("Choose a linked bank account as the source.");
     }
+    if (isValidDateKey(asset.startDate) && date < asset.startDate) {
+      throw new Error("The transaction date cannot be earlier than this investment's start date.");
+    }
+    assertChronologicalMarketTransaction(asset, date, existingLedgerSnapshot.docs);
 
-    const balanceInPaise = readPaise(
-      account,
-      "balanceInPaise",
-      "balance",
-    );
+    const oldValueInPaise = readPaise(asset, "currentValueInPaise", "currentValue");
+    const oldInvestedInPaise = readPaise(asset, "investedAmountInPaise", "investedAmount");
+    const oldBalanceInPaise = readPaise(account, "balanceInPaise", "balance");
+    if (!Number.isSafeInteger(oldBalanceInPaise) || oldBalanceInPaise < 0) {
+      throw new Error("The bank account balance is invalid.");
+    }
 
-    if (!Number.isSafeInteger(balanceInPaise) || balanceInPaise < amountInPaise) {
-      throw new Error(
-        `Insufficient balance in ${account.name || "the selected account"}.`,
+    let cashAmountInPaise = budgetInPaise;
+    let updatedAsset;
+    let marketBuy = null;
+
+    if (isMarketAssetClass(asset.assetClass)) {
+      marketBuy = calculateMarketBuy({
+        assetClass: asset.assetClass,
+        budgetInPaise,
+        unitPrice: Number(data.unitPrice),
+        quantity: data.quantity == null || data.quantity === "" ? null : Number(data.quantity),
+        chargesInPaise: Number(data.transactionChargesInPaise || 0),
+      });
+      cashAmountInPaise = marketBuy.totalCostInPaise;
+      const oldUnits = Math.max(0, Number(asset.units || 0));
+      if (oldInvestedInPaise > 0 && oldUnits <= 0) {
+        throw new Error("This older stock/fund holding has no recorded units. Edit or recreate it with the original units and purchase price before adding another purchase.");
+      }
+      const nextUnits = oldUnits + marketBuy.quantity;
+      const nextCostBasis = oldInvestedInPaise + marketBuy.totalCostInPaise;
+      const marketPrice = Number(asset.lastMarketPrice) > 0
+        ? Number(asset.lastMarketPrice)
+        : Number(data.unitPrice);
+      const nextValue = Number(asset.lastMarketPrice) > 0
+        ? calculateMarketPositionValueInPaise(nextUnits, marketPrice)
+        : oldValueInPaise + marketBuy.tradeValueInPaise;
+      updatedAsset = withMoneyFields(
+        {
+          ...asset,
+          units: nextUnits,
+          averageBuyPrice: nextUnits > 0 ? (nextCostBasis / 100) / nextUnits : 0,
+          lastContributionDate: date,
+          updatedAt: serverTimestamp(),
+          marketAssetAccountingVersion: 2,
+          transactionChargesInPaise: Math.max(0, Number(asset.transactionChargesInPaise || 0)) + marketBuy.chargesInPaise,
+          purchaseUnitPrice: marketBuy.unitPrice,
+        },
+        nextCostBasis,
+        nextValue,
+      );
+    } else {
+      updatedAsset = withMoneyFields(
+        { ...asset, lastContributionDate: date, updatedAt: serverTimestamp() },
+        oldInvestedInPaise + budgetInPaise,
+        oldValueInPaise + budgetInPaise,
       );
     }
 
-    const oldValue = readPaise(
-      asset,
-      "currentValueInPaise",
-      "currentValue",
-    );
-
-    const oldInvested = readPaise(
-      asset,
-      "investedAmountInPaise",
-      "investedAmount",
-    );
-
-    const updatedAsset = withMoneyFields(
-      {
-        ...asset,
-        updatedAt: serverTimestamp(),
-        lastContributionDate: date,
-      },
-      oldInvested + amountInPaise,
-      oldValue + amountInPaise,
-    );
-
-    const nextBalance = balanceInPaise - amountInPaise;
-
+    if (oldBalanceInPaise < cashAmountInPaise) {
+      throw new Error(`Insufficient balance in ${account.name || "the selected account"}.`);
+    }
+    const nextBalance = oldBalanceInPaise - cashAmountInPaise;
     transaction.update(accountRef, {
       balance: nextBalance / 100,
       balanceInPaise: nextBalance,
       updatedAt: serverTimestamp(),
     });
-
     transaction.update(assetRef, updatedAsset);
 
     transaction.set(mainTransactionRef, {
@@ -1404,8 +1735,8 @@ export const transferToInvestment = async (
       userId,
       type: "expense",
       kind: "investment-transfer",
-      amount: amountInPaise / 100,
-      amountInPaise,
+      amount: cashAmountInPaise / 100,
+      amountInPaise: cashAmountInPaise,
       categoryId: "investment-transfer",
       category: "Investment Transfer",
       categoryIcon: "📈",
@@ -1430,8 +1761,20 @@ export const transferToInvestment = async (
       assetClass: asset.assetClass || "other",
       type: "bank_transfer",
       direction: "in",
-      amountInPaise,
-      amount: amountInPaise / 100,
+      amountInPaise: cashAmountInPaise,
+      amount: cashAmountInPaise / 100,
+      ...(marketBuy ? {
+        marketTransactionType: "buy",
+        quantity: marketBuy.quantity,
+        unitPrice: marketBuy.unitPrice,
+        unitPriceDate: data.unitPriceDate || date,
+        unitPriceSource: data.unitPriceSource || "manual_reference",
+        tradeValueInPaise: marketBuy.tradeValueInPaise,
+        costBasisChangeInPaise: marketBuy.totalCostInPaise,
+        transactionChargesInPaise: marketBuy.chargesInPaise,
+        unspentBudgetInPaise: marketBuy.unspentBudgetInPaise,
+        averageBuyPrice: updatedAsset.averageBuyPrice,
+      } : {}),
       accountId: data.accountId,
       sourceAccountId: data.accountId,
       sourceAccountName: account.name || "Bank account",
@@ -1442,19 +1785,16 @@ export const transferToInvestment = async (
       createdAt: serverTimestamp(),
     });
 
-    writeSnapshot(
-      transaction,
-      snapshotRef,
-      date,
-      existingAssets.docs,
-      data.investmentId,
-      updatedAsset,
-    );
+    writeSnapshot(transaction, snapshotRef, todayKey(), existingAssets.docs, data.investmentId, updatedAsset);
+    result = {
+      transferId,
+      transactionId: transferId,
+      ledgerTransactionId: ledgerRef.id,
+      amountInPaise: cashAmountInPaise,
+      quantity: marketBuy?.quantity ?? null,
+      unspentBudgetInPaise: marketBuy?.unspentBudgetInPaise ?? 0,
+    };
   });
 
-  return {
-    transferId,
-    transactionId: transferId,
-    ledgerTransactionId: ledgerRef.id,
-  };
+  return result;
 };

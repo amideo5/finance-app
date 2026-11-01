@@ -8,6 +8,7 @@ import {
   compoundPrincipal,
   getDaysBetween,
   getNextContributionSchedule,
+  getNextUnprocessedContributionSchedule,
   isValidDateKey,
 } from '../src/services/calculations/investmentGrowth.ts';
 
@@ -62,4 +63,25 @@ test('RD scheduling starts at the next anchored interval without retroactive cat
     getNextContributionSchedule('2026-10-29', 'monthly', '2026-10-29'),
     { index: 1, date: '2026-11-29' },
   );
+});
+
+
+test('backdated weekly RD initializes at the first missed installment and resumes after the last posted date', () => {
+  assert.deepEqual(
+    getNextUnprocessedContributionSchedule('2026-10-20', 'weekly', null),
+    { index: 1, date: '2026-10-27' },
+  );
+  assert.deepEqual(
+    getNextUnprocessedContributionSchedule('2026-10-20', 'weekly', '2026-10-27'),
+    { index: 2, date: '2026-11-03' },
+  );
+});
+
+test('backdated daily-compounding RD accrues interest separately from each deposit date', () => {
+  const flows = [
+    { type: 'opening_balance', date: '2026-10-20', amountInPaise: 500_000 },
+    { type: 'contribution', date: '2026-10-27', amountInPaise: 500_000 },
+  ];
+  // 12 days of interest on the opening deposit, 5 days on the weekly installment.
+  assert.equal(calculateAccruedValueInPaise(flows, 5, '2026-11-01', 'daily'), 1_001_166);
 });

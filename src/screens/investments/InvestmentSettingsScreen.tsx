@@ -8,6 +8,7 @@ import { ArrowLeft, Check, Settings2 } from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { toLocalDateKey } from '@/src/utils/validation';
 
 const COMPOUNDING = [
   { value: 'daily', label: 'Daily' },
@@ -79,8 +80,8 @@ export default function InvestmentSettingsScreen() {
 
   const submit = async () => {
     if (!currentProfile?.id || !investmentId || !investment) return;
-    if (!isValidDateKey(startDate)) {
-      Alert.alert('Check the start date', 'Use a real calendar date in YYYY-MM-DD format.');
+    if (!isValidDateKey(startDate) || startDate > toLocalDateKey(new Date())) {
+      Alert.alert('Check the start date', 'Use a real calendar date that is not in the future (YYYY-MM-DD).');
       return;
     }
     const rate = Number(annualRate);
@@ -197,7 +198,7 @@ export default function InvestmentSettingsScreen() {
         {isMarket ? (
           <View style={styles.panel}>
             <Text style={styles.panelTitle}>Automatic market valuation</Text>
-            <Text style={styles.helper}>{investment.assetClass === 'mutual_fund' ? 'Search MFAPI for the scheme code, then the latest published NAV will be multiplied by your units.' : 'Enter an Alpha Vantage ticker. Stock price fetching requires EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY.'}</Text>
+            <Text style={styles.helper}>{investment.assetClass === 'mutual_fund' ? 'Search MFAPI for the scheme code, then the latest published NAV will be multiplied by your units.' : 'Enter an Alpha Vantage ticker. Stock quotes are fetched securely through the Supabase stock-quote Edge Function.'}</Text>
             <Text style={styles.label}>{investment.assetClass === 'mutual_fund' ? 'MFAPI SCHEME CODE' : 'EXCHANGE TICKER'}</Text>
             <TextInput value={marketDataId} onChangeText={setMarketDataId} style={styles.input} placeholder={investment.assetClass === 'mutual_fund' ? 'e.g. 125497' : 'e.g. RELIANCE.BSE'} placeholderTextColor={colors.textLight} autoCapitalize="characters" />
             {investment.assetClass === 'mutual_fund' && !Number(investment.units) ? <Text style={styles.warning}>This holding has no units stored, so NAV cannot calculate the value. Existing units must be added to the holding before automatic valuation is useful.</Text> : null}
