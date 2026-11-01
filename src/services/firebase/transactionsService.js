@@ -36,7 +36,11 @@ export const addTransaction = async (profileId, data) => {
           `Insufficient balance in ${accountName}. Available ₹${current.toFixed(2)}, required ₹${Math.abs(delta).toFixed(2)}. Choose another account or add funds first.`,
         );
       }
-      transaction.update(accountRef, { balance: current + delta, updatedAt: serverTimestamp() });
+      transaction.update(accountRef, {
+        balance: current + delta,
+        balanceInPaise: Math.round((current + delta) * 100),
+        updatedAt: serverTimestamp(),
+      });
     }
     transaction.set(txRef, {
       ...data,

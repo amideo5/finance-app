@@ -64,7 +64,7 @@ service cloud.firestore {
         && request.resource.data.get('amount', 0) > 0
         && request.resource.data.get('amountInPaise', 0) is int
         && request.resource.data.get('amountInPaise', 0) > 0
-        && exists(investmentPath)
+        && (exists(investmentPath) || existsAfter(investmentPath))
         && exists(accountPath)
         && get(accountPath).data.type == 'bank'
         && existsAfter(ledgerPath)
@@ -83,7 +83,9 @@ service cloud.firestore {
             && request.resource.data.type == 'expense'
             && request.resource.data.category == 'Investment Transfer'
             && getAfter(accountPath).data.balance < get(accountPath).data.balance
-            && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+            && ((exists(investmentPath)
+              && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+              || (!exists(investmentPath) && getAfter(investmentPath).data.currentValue > 0)))
           ||
           (direction == 'out'
             && request.resource.data.type == 'income'
@@ -106,7 +108,7 @@ service cloud.firestore {
         && direction in ['in', 'out']
         && request.resource.data.amountInPaise is int
         && existsAfter(mainTransactionPath)
-        && exists(investmentPath)
+        && (exists(investmentPath) || existsAfter(investmentPath))
         && exists(accountPath)
         && getAfter(accountPath).data.type == 'bank'
         && getAfter(mainTransactionPath).data.kind == 'investment-transfer'
@@ -122,7 +124,9 @@ service cloud.firestore {
             && getAfter(mainTransactionPath).data.category == 'Investment Transfer'
             && getAfter(mainTransactionPath).data.amountInPaise == request.resource.data.amountInPaise
             && getAfter(accountPath).data.balance < get(accountPath).data.balance
-            && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+            && ((exists(investmentPath)
+              && getAfter(investmentPath).data.currentValue > get(investmentPath).data.currentValue)
+              || (!exists(investmentPath) && getAfter(investmentPath).data.currentValue > 0)))
           ||
           (direction == 'out'
             && request.resource.data.amountInPaise < 0
@@ -203,10 +207,20 @@ service cloud.firestore {
         allow create:
           if canEditProfile(profileId)
           && (
-            // Ordinary transactions must not contain reserved fields.
-            !request.resource.data.keys().hasAny([
-              'kind', 'splitId', 'settlementId', 'serverGenerated'
-            ])
+            // Investment-to-bank and bank-to-investment transfers have their own
+            // paired-write validation and are not ordinary income/expense rows.
+            (request.resource.data.kind == 'investment-transfer'
+              && validMainInvestmentTransfer(profileId, transactionId))
+
+            // Ordinary transactions must not contain reserved split/server fields.
+            || (
+              !request.resource.data.keys().hasAny([
+                'kind', 'splitId', 'settlementId', 'serverGenerated'
+              ])
+              && !request.resource.data.keys().hasAny([
+                'investmentTransferId', 'investmentTransferDirection', 'investmentLedgerEntryId', 'investmentId', 'investmentName', 'assetClass'
+              ])
+            )
 
             // Permit only a specifically shaped self-transfer.
             || (
@@ -217,6 +231,9 @@ service cloud.firestore {
               && request.resource.data.amount is number
               && request.resource.data.amount > 0
               && request.resource.data.accountId is string
+              && !request.resource.data.keys().hasAny([
+                'investmentTransferId', 'investmentTransferDirection', 'investmentLedgerEntryId', 'investmentId', 'investmentName', 'assetClass'
+              ])
               && exists(
                 /databases/$(database)/documents/profiles/$(profileId)/accounts/$(request.resource.data.accountId)
               )
@@ -227,11 +244,14 @@ service cloud.firestore {
           if canEditProfile(profileId)
           && !resource.data.keys().hasAny(['kind', 'serverGenerated'])
           && !request.resource.data.keys().hasAny(['kind', 'splitId', 'settlementId', 'serverGenerated'])
+          && !request.resource.data.keys().hasAny(['investmentTransferId', 'investmentTransferDirection', 'investmentLedgerEntryId', 'investmentId', 'investmentName', 'assetClass'])
+          && !resource.data.keys().hasAny(['investmentTransferId', 'investmentTransferDirection', 'investmentLedgerEntryId', 'investmentId', 'investmentName', 'assetClass'])
           && sourceTransactionReleased(profileId, transactionId);
 
         allow delete:
           if canEditProfile(profileId)
           && !resource.data.keys().hasAny(['kind', 'serverGenerated'])
+          && !resource.data.keys().hasAny(['investmentTransferId', 'investmentTransferDirection', 'investmentLedgerEntryId', 'investmentId', 'investmentName', 'assetClass'])
           && sourceTransactionReleased(profileId, transactionId);
       }
 
@@ -251,11 +271,29 @@ service cloud.firestore {
 
         match /transactions/{transactionId} {
           allow read: if canAccessProfile(profileId);
-          allow create, update, delete: if canEditProfile(profileId);
+          allow create:
+            if canEditProfile(profileId)
+            && (
+              request.resource.data.type != 'bank_transfer'
+              || validInvestmentLedgerTransfer(profileId, investmentId, transactionId)
+            );
+          allow update:
+            if canEditProfile(profileId)
+            && resource.data.type != 'bank_transfer'
+            && request.resource.data.type != 'bank_transfer';
+          allow delete:
+            if canEditProfile(profileId) && resource.data.type != 'bank_transfer';
         }
       }
 
       match /netWorthSnapshots/{snapshotId} {
+        allow read: if canAccessProfile(profileId);
+        allow create, update, delete: if canEditProfile(profileId);
+      }
+
+      // Portfolio-level value history. Each snapshot is written atomically with
+      // the corresponding investment ledger event (including bank transfers).
+      match /investmentSnapshots/{snapshotId} {
         allow read: if canAccessProfile(profileId);
         allow create, update, delete: if canEditProfile(profileId);
       }
