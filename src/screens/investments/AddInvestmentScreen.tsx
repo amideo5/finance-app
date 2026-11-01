@@ -406,7 +406,7 @@ export default function AddInvestmentScreen() {
 
         <Text style={styles.title}>Add an investment</Text>
         <Text style={styles.subtitle}>
-          Track investment cash flows separately, with automatic accrued-value or market-price estimates where configured.
+          Add a holding to your portfolio.
         </Text>
 
         {isBankFundedCreation ? (
@@ -418,7 +418,7 @@ export default function AddInvestmentScreen() {
                 : 'Loading the selected bank account…'}
             </Text>
             <Text style={styles.infoText}>
-              The initial purchase/principal will be debited from this account in the same atomic save that creates the investment. Any unused stock purchase budget remains in the bank account. Future RD installments can be linked to a source account separately below. This updates only your app's tracked balance; it does not initiate a real bank debit.
+              The amount will be deducted from this tracked account when you save. No real bank debit is initiated.
             </Text>
           </View>
         ) : null}
@@ -432,7 +432,7 @@ export default function AddInvestmentScreen() {
           style={styles.input}
           autoCapitalize="none"
         />
-        <Text style={styles.helper}>{assetClass === 'stock' ? 'The app looks up the historical closing price for this date. If the exchange was closed, it uses the next available trading session; if that session has not happened yet, it uses the latest previous close.' : assetClass === 'mutual_fund' ? 'The app looks up the scheme NAV around this transaction date and calculates units automatically. Actual applicable NAV can depend on timestamp and fund realization.' : 'Used as the anchor date for accruals and recurring RD installments.'}</Text>
+        <Text style={styles.helper}>{['stock', 'mutual_fund'].includes(assetClass) ? 'Used to find the historical price or NAV.' : 'Used to calculate interest and installments.'}</Text>
 
         <Text style={styles.label}>ASSET CLASS</Text>
         <View style={styles.assetGrid}>
@@ -485,7 +485,7 @@ export default function AddInvestmentScreen() {
         {assetClass === 'stock' ? (
           <View style={styles.termPanel}>
             <Text style={styles.panelTitle}>Find a listed stock</Text>
-            <Text style={styles.helper}>Search by company name or ticker. Select the correct exchange listing and the app will fill in its name and ticker automatically.</Text>
+            <Text style={styles.helper}>Search and select the correct exchange listing.</Text>
             <View style={styles.twoColumn}>
               <View style={[styles.halfField, { flex: 1.2 }]}>
                 <TextInput
@@ -542,42 +542,22 @@ export default function AddInvestmentScreen() {
           </View>
         ) : (
           <>
-            <Text style={styles.label}>INVESTMENT NAME *</Text>
-            <TextInput
-              value={name}
-              onChangeText={setName}
-              placeholder="e.g. HDFC Flexi Cap Fund"
-              placeholderTextColor={colors.textLight}
-              style={styles.input}
-              maxLength={90}
-            />
+            {assetClass !== 'mutual_fund' ? (
+              <>
+                <Text style={styles.label}>INVESTMENT NAME *</Text>
+                <TextInput
+                  value={name}
+                  onChangeText={setName}
+                  placeholder="e.g. SBI Fixed Deposit"
+                  placeholderTextColor={colors.textLight}
+                  style={styles.input}
+                  maxLength={90}
+                />
+              </>
+            ) : null}
           </>
         )}
 
-        {assetClass !== 'stock' ? <View style={styles.twoColumn}>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>BANK / PROVIDER</Text>
-            <TextInput
-              value={provider}
-              onChangeText={setProvider}
-              placeholder="e.g. HDFC"
-              placeholderTextColor={colors.textLight}
-              style={styles.input}
-            />
-          </View>
-
-          <View style={styles.halfField}>
-            <Text style={styles.label}>FOLIO / DISPLAY SYMBOL</Text>
-            <TextInput
-              value={symbol}
-              onChangeText={setSymbol}
-              placeholder="Optional"
-              placeholderTextColor={colors.textLight}
-              style={styles.input}
-              autoCapitalize="characters"
-            />
-          </View>
-        </View> : null}
 
         <View style={styles.twoColumn}>
           <View style={[styles.halfField, ['fixed_deposit', 'recurring_deposit'].includes(assetClass) && { flex: 1 }, ['stock', 'mutual_fund'].includes(assetClass) && { flex: 1 }]}>
@@ -609,10 +589,8 @@ export default function AddInvestmentScreen() {
 
         <Text style={styles.helper}>
           {['fixed_deposit', 'recurring_deposit'].includes(assetClass)
-            ? 'Current value and estimated interest are calculated automatically from the principal, start date, rate and dated contributions.'
-            : ['stock', 'mutual_fund'].includes(assetClass)
-              ? 'For stocks and mutual funds, the app fetches a historical price/NAV from the selected instrument and date. The budget determines shares or units automatically.'
-              : 'Current value defaults to net invested when left blank. Amounts are stored in paise for accurate totals.'}
+            ? 'Estimated value is calculated from your deposit, rate and dates.'
+            : 'The purchase quantity is calculated automatically from the budget and historical price.'}
         </Text>
 
         {['fixed_deposit', 'recurring_deposit'].includes(assetClass) ? (
@@ -682,26 +660,6 @@ export default function AddInvestmentScreen() {
                 </TouchableOpacity>
               ))}
             </View>
-            <Text style={styles.label}>SOURCE ACCOUNT</Text>
-            <View style={styles.accountChoices}>
-              <TouchableOpacity
-                style={[styles.accountChoice, sourceAccountId === 'none' && styles.accountChoiceSelected]}
-                onPress={() => setSourceAccountId('none')}
-              >
-                <Text style={[styles.accountChoiceName, sourceAccountId === 'none' && styles.accountChoiceNameSelected]}>No source · track only</Text>
-                <Text style={styles.accountChoiceMeta}>Does not change a bank balance</Text>
-              </TouchableOpacity>
-              {accounts.map((account) => (
-                <TouchableOpacity
-                  key={account.id}
-                  style={[styles.accountChoice, sourceAccountId === account.id && styles.accountChoiceSelected]}
-                  onPress={() => setSourceAccountId(account.id)}
-                >
-                  <Text style={[styles.accountChoiceName, sourceAccountId === account.id && styles.accountChoiceNameSelected]}>{account.name || 'Bank account'}</Text>
-                  <Text style={styles.accountChoiceMeta}>Available balance: ₹{Number(account.balance || 0).toLocaleString('en-IN')}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
             <Text style={styles.helper}>Due installments are caught up when you open the app. A linked source updates only this app's tracked account balance; it does not trigger a real bank debit or mandate.</Text>
           </View>
         ) : null}
@@ -709,23 +667,8 @@ export default function AddInvestmentScreen() {
         {assetClass === 'mutual_fund' ? (
           <View style={styles.termPanel}>
             <Text style={styles.panelTitle}>Automatic historical NAV</Text>
-            <Text style={styles.helper}>Search and select the exact scheme variant (Direct/Regular and Growth/IDCW). The app fetches its historical NAV for the selected date and calculates units from your budget.</Text>
-            <Text style={styles.label}>MFAPI SCHEME CODE</Text>
-            <TextInput
-              value={marketDataId}
-              onChangeText={(value) => {
-                setMarketDataId(value.replace(/\D/g, ''));
-                setPurchasePrice('');
-                setPurchasePriceDate('');
-                setPurchasePriceLabel('');
-                setHistoricalPriceError('');
-              }}
-              placeholder="Selected automatically from scheme search"
-              placeholderTextColor={colors.textLight}
-              keyboardType="number-pad"
-              style={styles.input}
-            />
-            <View style={styles.twoColumn}>
+            <Text style={styles.helper}>Search and select the exact scheme variant. Units are calculated using its historical NAV.</Text>
+<View style={styles.twoColumn}>
               <View style={[styles.halfField, { flex: 1.2 }]}>
                 <TextInput
                   value={schemeQuery}
@@ -816,7 +759,7 @@ export default function AddInvestmentScreen() {
                 <Text style={styles.searchButtonText}>{manualExecutionPrice ? 'Use automatic historical NAV' : 'Enter actual AMC allotment NAV instead'}</Text>
               </TouchableOpacity>
             ) : null}
-            <Text style={styles.helper}>Important: NAV applicability depends on the transaction timestamp and when the purchase funds are available to the mutual fund. This date-based lookup is a historical reference; use the actual allotment NAV from your AMC statement for exact accounting.</Text>
+            <Text style={styles.helper}>For exact accounting, use the allotment NAV from your AMC statement.</Text>
           </View>
         ) : null}
 
@@ -866,30 +809,7 @@ export default function AddInvestmentScreen() {
           </View>
         ) : null}
 
-        {['stock', 'mutual_fund'].includes(assetClass) ? <Text style={styles.label}>{assetClass === 'stock' ? 'SHARES (OPTIONAL — WHOLE SHARES ONLY)' : 'UNITS ALLOTTED (OPTIONAL)'}</Text> : <Text style={styles.label}>UNITS / QUANTITY (OPTIONAL)</Text>}
-        <TextInput
-          value={units}
-          onChangeText={setUnits}
-          placeholder={assetClass === 'stock' ? 'Auto-calculated or e.g. 10' : 'Auto-calculated or e.g. 12.500'}
-          placeholderTextColor={colors.textLight}
-          keyboardType={assetClass === 'stock' ? 'number-pad' : 'decimal-pad'}
-          style={styles.input}
-        />
 
-        {['stock', 'mutual_fund'].includes(assetClass) ? (
-          <>
-            <Text style={styles.label}>BROKERAGE / TRANSACTION CHARGES (₹)</Text>
-            <TextInput
-              value={transactionCharges}
-              onChangeText={setTransactionCharges}
-              placeholder="0"
-              placeholderTextColor={colors.textLight}
-              keyboardType="decimal-pad"
-              style={styles.input}
-            />
-            <Text style={styles.helper}>Charges are included in acquisition cost basis. They do not increase the market value of the shares or units.</Text>
-          </>
-        ) : null}
 
         {marketPurchasePreview ? (
           <View style={styles.infoBox}>
@@ -901,16 +821,6 @@ export default function AddInvestmentScreen() {
           </View>
         ) : null}
 
-        <Text style={styles.label}>NOTES (OPTIONAL)</Text>
-        <TextInput
-          value={notes}
-          onChangeText={setNotes}
-          placeholder="Maturity date, folio details, etc."
-          placeholderTextColor={colors.textLight}
-          style={[styles.input, styles.notesInput]}
-          multiline
-          textAlignVertical="top"
-        />
 
         {!isBankFundedCreation ? (
           <View style={styles.infoBox}>
@@ -943,7 +853,7 @@ export default function AddInvestmentScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
-  content: { paddingHorizontal: 20 },
+  content: { paddingHorizontal: 20, paddingBottom: 32 },
   backButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -972,11 +882,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 17,
     marginTop: 7,
-    marginBottom: 23,
+    marginBottom: 18,
   },
   label: {
     color: colors.textSecondary,
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '800',
     letterSpacing: 0.9,
     marginBottom: 8,
@@ -1015,14 +925,14 @@ const styles = StyleSheet.create({
   },
   assetLabelSelected: { color: colors.primary },
   input: {
-    height: 48,
-    borderRadius: 13,
+    height: 50,
+    borderRadius: 14,
     backgroundColor: colors.card,
     borderColor: colors.border,
     borderWidth: 1,
     paddingHorizontal: 13,
     color: colors.text,
-    fontSize: 12,
+    fontSize: 14,
   },
   twoColumn: { flexDirection: 'row', gap: 10 },
   halfField: { flex: 1 },
@@ -1036,8 +946,8 @@ const styles = StyleSheet.create({
   termPanel: {
     backgroundColor: colors.card,
     borderRadius: 16,
-    padding: 14,
-    marginTop: 18,
+    padding: 16,
+    marginTop: 16,
     borderWidth: 1,
     borderColor: colors.border,
   },
