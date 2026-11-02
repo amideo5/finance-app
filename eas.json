@@ -1,12 +1,13 @@
+
 {
   "cli": {
     "version": ">= 27.2.0",
     "appVersionSource": "remote"
   },
-    "build": {
-      "development": {
-        "developmentClient": true,
-        "distribution": "internal"
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
     },
     "development-simulator": {
       "developmentClient": true,
@@ -17,12 +18,21 @@
     },
     "preview": {
       "distribution": "internal",
+      "environment": "preview",
       "android": {
         "buildType": "apk"
       }
     },
     "production": {
       "autoIncrement": true
+    },
+    "friends-android": {
+      "extends": "production",
+      "distribution": "internal",
+      "environment": "production",
+      "android": {
+        "buildType": "apk"
+      }
     }
   },
   "submit": {

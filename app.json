@@ -1,3 +1,4 @@
+
 {
   "expo": {
     "name": "Finance App",
@@ -9,10 +10,16 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.embrise.financeapp"
+      "bundleIdentifier": "com.embrise.financeapp",
+      "icon": "./assets/images/icon.png"
     },
     "android": {
-      "package": "com.embrise.financeapp"
+      "package": "com.embrise.financeapp",
+      "icon": "./assets/images/icon.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon-foreground.png",
+        "backgroundColor": "#101827"
+      }
     },
     "web": {
       "bundler": "metro",

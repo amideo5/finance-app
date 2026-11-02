@@ -89,3 +89,5 @@ ehthumbs.db
 *.sln
 *.sw?
 git_changes
+ios
+android
