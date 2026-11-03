@@ -12,7 +12,7 @@ import Card from '@/src/components/ui/Card';
 import { colors } from '@/src/constants/colors';
 import { useAuth } from '@/src/context/AuthContext';
 import { useProfile } from '@/src/context/ProfileContext';
-import { ChevronRight, User, Lock, LogOut, Plus, Check } from 'lucide-react-native';
+import { ChevronRight, User, Lock, LogOut, Plus, Check, Pencil } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function SettingsScreen() {
@@ -135,6 +135,14 @@ export default function SettingsScreen() {
                   ) : (
                     <View style={styles.inactiveIndicator} />
                   )}
+                  <TouchableOpacity
+                    style={styles.profileEditButton}
+                    onPress={() => router.push(`/settings/profiles/${profile.id}`)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Edit ${profile.name} profile`}
+                  >
+                    <Pencil color={colors.primary} size={15} />
+                  </TouchableOpacity>
                 </TouchableOpacity>
               );
             })
@@ -359,6 +367,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  profileEditButton: { width: 32, height: 32, borderRadius: 10, backgroundColor: "#F0EFFF", alignItems: "center", justifyContent: "center", marginLeft: 8 },
   profileEmojiContainer: {
     width: 46,
     height: 46,

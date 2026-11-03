@@ -4,7 +4,7 @@ import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '@/src/constants/categorie
 import { colors } from '@/src/constants/colors';
 import { useAuth } from '@/src/context/AuthContext';
 import { useProfile } from '@/src/context/ProfileContext';
-import { useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -16,13 +16,16 @@ import {
     db
 } from '@/src/firebaseConfig';
 
-import { addTransaction } from '@/src/services/firebase/transactionsService';
+import { addTransaction, updateTransaction } from '@/src/services/firebase/transactionsService';
 import { getOrCreateCashAccount } from '@/src/services/firebase/accountsService';
 import { isDateKey, parsePositiveAmount, toLocalDateKey } from '@/src/utils/validation';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
 
 export default function AddExpenseScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ transactionId?: string | string[] }>();
+  const transactionId = Array.isArray(params.transactionId) ? params.transactionId[0] : params.transactionId;
+  const isEditing = Boolean(transactionId);
   const insets = useSafeAreaInsets();
   const { currentProfile } = useProfile();
   const { user } = useAuth();
@@ -34,6 +37,7 @@ export default function AddExpenseScreen() {
   const [notes, setNotes] = useState('');
   const [date, setDate] = useState(toLocalDateKey(new Date()));
   const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(Boolean(transactionId));
   const [datePickerVisible, setDatePickerVisible] = useState(false);
   const [categoryQuery, setCategoryQuery] = useState('');
 
@@ -71,7 +75,7 @@ export default function AddExpenseScreen() {
         result.push(cash);
       }
       setAccounts(result);
-      if (selectedPaymentMode === 'cash') setSelectedAccount(cash.id);
+      if (selectedPaymentMode === 'cash' && !isEditing) setSelectedAccount(cash.id);
     } catch (e) {
       console.log("Account Load Error:", e);
     }
@@ -85,6 +89,40 @@ export default function AddExpenseScreen() {
     }
   }, [currentProfile, loadAccounts]);
 
+
+  // Load an existing ordinary transaction when this form is opened in edit mode.
+  useEffect(() => {
+    let active = true;
+    const loadTransaction = async () => {
+      if (!transactionId || !currentProfile) { setInitialLoading(false); return; }
+      try {
+        const ref = doc(db, 'profiles', currentProfile.id, 'transactions', transactionId);
+        const snapshot = await getDoc(ref);
+        if (!snapshot.exists()) throw new Error('This transaction could not be found.');
+        const record = snapshot.data() as any;
+        if (record.kind || record.splitId || record.settlementId || record.investmentTransferId || record.investmentId) {
+          throw new Error('This transaction is managed by a split, settlement, or investment workflow and cannot be edited here.');
+        }
+        if (!active) return;
+        setAmount(String(record.amount ?? (Number(record.amountInPaise || 0) / 100)));
+        setTransactionType(record.type === 'income' ? 'income' : 'expense');
+        setSelectedPaymentMode(String(record.paymentMode || 'cash'));
+        setSelectedAccount(record.accountId || null);
+        setNotes(String(record.notes || ''));
+        setDate(String(record.date || toLocalDateKey(new Date())));
+        const categories = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+        setSelectedCategory(categories.find((item) => item.id === record.categoryId || item.name === record.category) || {
+          id: record.categoryId || record.category || 'other',
+          name: record.category || 'Other',
+          icon: record.categoryIcon || '🧾',
+        });
+      } catch (error) {
+        if (active) Alert.alert('Could not load transaction', error instanceof Error ? error.message : 'Please try again.');
+      } finally { if (active) setInitialLoading(false); }
+    };
+    void loadTransaction();
+    return () => { active = false; };
+  }, [transactionId, currentProfile]);
 
   // -------------------------------------------------------
   // SUBMIT TRANSACTION (Firebase)
@@ -113,7 +151,7 @@ export default function AddExpenseScreen() {
     setLoading(true);
 
     try {
-      await addTransaction(currentProfile.id, {
+      const payload = {
         profileId: currentProfile.id,
         userId: user.uid,
         type: transactionType,
@@ -126,7 +164,9 @@ export default function AddExpenseScreen() {
         notes: notes.trim() || null,
         date,
         currency: currentProfile.currency || 'INR',
-      });
+      };
+      if (isEditing && transactionId) await updateTransaction(currentProfile.id, transactionId, payload);
+      else await addTransaction(currentProfile.id, payload);
 
       router.back();
     } catch (error) {
@@ -154,7 +194,11 @@ export default function AddExpenseScreen() {
     ? account.type === 'cash'
     : account.type !== 'cash');
 
+  if (initialLoading) return <View style={styles.loadingScreen}><Text style={styles.loadingText}>Loading transaction…</Text></View>;
+
   return (
+    <>
+    <Stack.Screen options={{ title: isEditing ? 'Edit transaction' : 'New transaction', headerShown: false }} />
     <View style={styles.screen}>
       <ScrollView
         style={styles.container}
@@ -169,8 +213,8 @@ export default function AddExpenseScreen() {
             <Text style={styles.cancelButtonText}>Cancel</Text>
           </TouchableOpacity>
           <View style={styles.headerTitleWrap}>
-            <Text style={styles.headerTitle}>New transaction</Text>
-            <Text style={styles.headerSubtitle}>Capture it now, understand it later.</Text>
+            <Text style={styles.headerTitle}>{isEditing ? 'Edit transaction' : 'New transaction'}</Text>
+            <Text style={styles.headerSubtitle}>{isEditing ? 'Correct the details and balances together.' : 'Capture it now, understand it later.'}</Text>
           </View>
         </View>
 
@@ -387,14 +431,14 @@ export default function AddExpenseScreen() {
           />
 
           <Button
-            title={loading ? 'Saving…' : `Save ${transactionType}`}
+            title={loading ? 'Saving…' : (isEditing ? 'Save changes' : `Save ${transactionType}`)}
             onPress={handleSubmit}
             loading={loading}
             disabled={!amount || !selectedCategory}
             size="large"
             style={styles.submitButton}
           />
-          <Text style={styles.footerHint}>Your transaction will be added to the selected profile.</Text>
+          <Text style={styles.footerHint}>{isEditing ? 'The selected account balance will be reconciled automatically.' : 'Your transaction will be added to the selected profile.'}</Text>
         </View>
       </ScrollView>
 
@@ -443,11 +487,14 @@ export default function AddExpenseScreen() {
         </View>
       </Modal>
     </View>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
+  loadingScreen: { flex: 1, backgroundColor: colors.background, alignItems: 'center', justifyContent: 'center' },
+  loadingText: { color: colors.textSecondary, fontSize: 13, fontWeight: '700' },
   container: { flex: 1, backgroundColor: colors.background },
   content: { paddingBottom: 28 },
   header: { paddingHorizontal: 20, paddingBottom: 20, gap: 14 },

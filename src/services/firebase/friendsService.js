@@ -112,6 +112,25 @@ export const rejectFriendRequest = async (requestId) => {
   }
 };
 
+// Cancel an outgoing request. The sender may only remove their own pending request.
+export const cancelSentFriendRequest = async (requestId, userId) => {
+  try {
+    const requestRef = firestoreDoc(db, "friendRequests", requestId);
+    return await runTransaction(db, async (transaction) => {
+      const requestSnapshot = await transaction.get(requestRef);
+      if (!requestSnapshot.exists()) throw new Error("Friend request no longer exists.");
+      const request = requestSnapshot.data();
+      if (request.fromUserId !== userId) throw new Error("You can only cancel requests you sent.");
+      if (request.status !== "pending") throw new Error("Only pending friend requests can be cancelled.");
+      transaction.delete(requestRef);
+      return true;
+    });
+  } catch (error) {
+    console.error("Error cancelling sent friend request:", error);
+    throw error;
+  }
+};
+
 // Get all friends of a user
 export const getUserFriends = async (userId) => {
   try {

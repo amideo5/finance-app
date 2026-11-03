@@ -170,6 +170,7 @@ export default function StatementScreen() {
   const [minAmount, setMinAmount] = useState('');
   const [maxAmount, setMaxAmount] = useState('');
   const [filtersExpanded, setFiltersExpanded] = useState(true);
+  const [visibleCount, setVisibleCount] = useState(50);
 
   const sourceSplitByTransaction = useMemo(() => {
     const map = new Map<string, SharedExpenseSplit>();
@@ -402,6 +403,12 @@ export default function StatementScreen() {
       return String(b.date || '').localeCompare(String(a.date || ''));
     });
   }, [transactions, typeFilter, paymentMode, categoryFilters, accountFilter, counterpartyFilter, kindFilter, searchText, minAmount, maxAmount, accountById, splitById, sortMode, sourceSplitByTransaction, splitsByTransactionId]);
+
+  useEffect(() => {
+    // Reset the visible slice whenever the active filters or result set change.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setVisibleCount(50);
+  }, [visibleTransactions]);
 
   const totals = useMemo(() => {
     let income = 0;
@@ -879,7 +886,16 @@ export default function StatementScreen() {
     return (
     <View style={styles.container}>
       <FlatList
-        data={visibleTransactions}
+        data={visibleTransactions.slice(0, visibleCount)}
+        onEndReached={() => setVisibleCount((current) => Math.min(current + 50, visibleTransactions.length))}
+        onEndReachedThreshold={0.45}
+        ListFooterComponent={visibleTransactions.length > visibleCount ? (
+          <View style={styles.paginationFooter}>
+            <Text style={styles.paginationFooterText}>Showing {Math.min(visibleCount, visibleTransactions.length)} of {visibleTransactions.length} records · scroll for more</Text>
+          </View>
+        ) : visibleTransactions.length > 0 ? (
+          <View style={styles.paginationFooter}><Text style={styles.paginationFooterText}>All {visibleTransactions.length} matching records shown</Text></View>
+        ) : null}
         keyExtractor={(item) => item.id}
         renderItem={renderTransaction}
         ListHeaderComponent={listHeader}
@@ -948,6 +964,8 @@ export default function StatementScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   listContent: { paddingBottom: 36 },
+  paginationFooter: { paddingVertical: 18, alignItems: 'center' },
+  paginationFooterText: { color: colors.textLight, fontSize: 10, fontWeight: '600' },
   topBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 18, paddingBottom: 20, gap: 12 },
   backButton: { width: 42, height: 42, borderRadius: 15, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   headingCopy: { flex: 1 },

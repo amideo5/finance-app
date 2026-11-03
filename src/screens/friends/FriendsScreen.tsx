@@ -4,6 +4,7 @@ import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import {
     acceptFriendRequest,
+    cancelSentFriendRequest,
     getPendingRequests,
     getSentRequests,
     getUserFriends,
@@ -21,7 +22,7 @@ import {
 import type { FinanceAccount, FriendSettlement, UnresolvedFriendObligation } from '@/types/finance';
 import { buildMaps, getOutstandingObligations, type SettlementSuggestion } from '@/src/utils/splitUtils';
 import { useRouter } from 'expo-router';
-import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, CheckCircle2, ChevronRight, CircleAlert, Clock3, Info, Layers3, Receipt, ShieldCheck, UserPlus, Users, Wallet, X } from 'lucide-react-native';
+import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, CheckCircle2, ChevronRight, CircleAlert, Clock3, Info, Layers3, Receipt, Search, ShieldCheck, UserPlus, Users, Wallet, X } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -47,6 +48,11 @@ export default function FriendsScreen() {
   const [sentRequests, setSentRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [peopleLimit, setPeopleLimit] = useState(30);
+  const [requestLimit, setRequestLimit] = useState(30);
+  const [incomingLimit, setIncomingLimit] = useState(30);
+  const [outgoingLimit, setOutgoingLimit] = useState(30);
+  const [historyLimit, setHistoryLimit] = useState(30);
   const [activeTab, setActiveTab] = useState<'friends' | 'pending' | 'sent' | 'splits' | 'settlements'>('friends');
   const [peopleSection, setPeopleSection] = useState<'friends' | 'requests'>('friends');
   const [requestSection, setRequestSection] = useState<'received' | 'sent'>('received');
@@ -116,6 +122,19 @@ export default function FriendsScreen() {
   const friendMap = Object.fromEntries(
     friends.map((friend) => [friend.friendId, friend.profileData?.name?.trim() || 'Friend'])
   );
+  const normalizedPeopleSearch = searchQuery.trim().toLowerCase();
+  const filteredFriends = friends.filter((friend) => {
+    const text = [friend.profileData?.name, friend.profileData?.email, friend.friendId].filter(Boolean).join(' ').toLowerCase();
+    return !normalizedPeopleSearch || text.includes(normalizedPeopleSearch);
+  });
+  const filteredPendingRequests = pendingRequests.filter((request) => {
+    const text = [request.profileData?.name, request.profileData?.email, request.fromUserId].filter(Boolean).join(' ').toLowerCase();
+    return !normalizedPeopleSearch || text.includes(normalizedPeopleSearch);
+  });
+  const filteredSentRequests = sentRequests.filter((request) => {
+    const text = [request.profileData?.name, request.profileData?.email, request.toUserId].filter(Boolean).join(' ').toLowerCase();
+    return !normalizedPeopleSearch || text.includes(normalizedPeopleSearch);
+  });
   const repaymentAmountNumber = Number(repaymentAmount);
   const repaymentAmountPaiseForUi = Math.round(repaymentAmountNumber * 100);
   const repaymentAmountValidForUi = Boolean(
@@ -364,6 +383,29 @@ export default function FriendsScreen() {
     }
   };
 
+  const handleCancelSentRequest = (requestId: string, recipientName: string) => {
+    Alert.alert(
+      'Cancel friend request',
+      `Cancel the request sent to ${recipientName}?`,
+      [
+        { text: 'Keep request', style: 'cancel' },
+        {
+          text: 'Cancel request',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await cancelSentFriendRequest(requestId, currentProfile!.userId);
+              await loadFriendsData();
+            } catch (error) {
+              console.error('Error cancelling sent request:', error);
+              Alert.alert('Could not cancel request', error instanceof Error ? error.message : 'Please try again.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const handleRemoveFriend = async (friendId: string, friendName: string) => {
     Alert.alert(
       'Remove Friend',
@@ -573,10 +615,24 @@ export default function FriendsScreen() {
   const renderSettlements = () => {
     const userId = currentProfile?.userId;
     if (!userId) return null;
-    const incoming = friendSettlements.filter((item) => item.status === 'pending' && item.toUserId === userId);
-    const outgoing = friendSettlements.filter((item) => item.status === 'pending' && item.fromUserId === userId);
+    const settlementSearch = searchQuery.trim().toLowerCase();
+    const matchesSettlement = (item: FriendSettlement) => {
+      if (!settlementSearch) return true;
+      const otherUserId = item.fromUserId === userId ? item.toUserId : item.fromUserId;
+      const searchable = [
+        getName(otherUserId),
+        otherUserId,
+        item.note,
+        item.status,
+        (item.amountInPaise / 100).toFixed(2),
+        String(item.amountInPaise),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return searchable.includes(settlementSearch);
+    };
+    const incoming = friendSettlements.filter((item) => item.status === 'pending' && item.toUserId === userId && matchesSettlement(item));
+    const outgoing = friendSettlements.filter((item) => item.status === 'pending' && item.fromUserId === userId && matchesSettlement(item));
     const history = friendSettlements
-      .filter((item) => item.status !== 'pending' && (item.fromUserId === userId || item.toUserId === userId))
+      .filter((item) => item.status !== 'pending' && (item.fromUserId === userId || item.toUserId === userId) && matchesSettlement(item))
       .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
     const empty = (message: string) => (
       <View style={styles.paymentEmptyState}><View style={styles.paymentEmptyIcon}><ArrowLeftRight size={20} color={colors.textLight} /></View><Text style={styles.paymentEmptyText}>{message}</Text></View>
@@ -640,20 +696,24 @@ export default function FriendsScreen() {
         </LinearGradient>
         <View style={styles.paymentsSection}>
           <View style={styles.contentSectionHeading}><View><Text style={styles.sectionTitle}>Incoming requests</Text><Text style={styles.sectionCaption}>Payments waiting for your decision</Text></View><View style={[styles.sectionCountBadge, incoming.length > 0 && styles.incomingCountBadge]}><Text style={[styles.sectionCountText, incoming.length > 0 && { color: colors.primary }]}>{incoming.length}</Text></View></View>
-          {incoming.length === 0 ? empty('No payment requests waiting for your acceptance.') : incoming.map((item) => card(item, 'incoming'))}
+          {incoming.length === 0 ? empty('No payment requests waiting for your acceptance.') : incoming.slice(0, incomingLimit).map((item) => card(item, 'incoming'))}
+          {incoming.length > incomingLimit ? <TouchableOpacity style={styles.loadMorePeople} onPress={() => setIncomingLimit((value) => value + 30)}><Text style={styles.loadMorePeopleText}>Show more incoming requests</Text></TouchableOpacity> : null}
         </View>
         <View style={styles.paymentsSection}>
           <View style={styles.contentSectionHeading}><View><Text style={styles.sectionTitle}>Sent requests</Text><Text style={styles.sectionCaption}>Requests awaiting the other person</Text></View><View style={styles.sectionCountBadge}><Text style={styles.sectionCountText}>{outgoing.length}</Text></View></View>
-          {outgoing.length === 0 ? empty('You have no pending settlement requests.') : outgoing.map((item) => card(item, 'outgoing'))}
+          {outgoing.length === 0 ? empty('You have no pending settlement requests.') : outgoing.slice(0, outgoingLimit).map((item) => card(item, 'outgoing'))}
+          {outgoing.length > outgoingLimit ? <TouchableOpacity style={styles.loadMorePeople} onPress={() => setOutgoingLimit((value) => value + 30)}><Text style={styles.loadMorePeopleText}>Show more sent requests</Text></TouchableOpacity> : null}
         </View>
         <View style={styles.paymentsSection}>
           <View style={styles.contentSectionHeading}><View><Text style={styles.sectionTitle}>Payment history</Text><Text style={styles.sectionCaption}>Completed or closed requests</Text></View><View style={styles.sectionCountBadge}><Text style={styles.sectionCountText}>{history.length}</Text></View></View>
-          {history.length === 0 ? empty('Accepted, rejected, and cancelled requests will appear here.') : history.slice(0, 30).map((item) => card(item, 'history'))}
+          {history.length === 0 ? empty('Accepted, rejected, and cancelled requests will appear here.') : history.slice(0, historyLimit).map((item) => card(item, 'history'))}
+          {history.length > historyLimit ? <TouchableOpacity style={styles.loadMorePeople} onPress={() => setHistoryLimit((value) => value + 30)}><Text style={styles.loadMorePeopleText}>Show more history</Text></TouchableOpacity> : null}
         </View>
       </View>
     );
   };
   const isPeopleArea = activeTab === 'friends' || activeTab === 'pending' || activeTab === 'sent';
+  const isSearchableArea = isPeopleArea || activeTab === 'settlements';
 
   const openPeopleArea = () => {
     setPeopleSection('friends');
@@ -692,7 +752,7 @@ export default function FriendsScreen() {
                 <Text style={styles.emptyPanelText}>New connection requests will appear here. You can accept or dismiss each request.</Text>
               </View>
             ) : (
-              pendingRequests.map((request) => (
+              filteredPendingRequests.slice(0, requestLimit).map((request) => (
                 <FriendCard
                   key={request.id}
                   friendName={request.profileData?.name || request.fromUserId}
@@ -703,6 +763,10 @@ export default function FriendsScreen() {
                 />
               ))
             )}
+            {filteredPendingRequests.length > requestLimit ? (
+              <TouchableOpacity style={styles.loadMorePeople} onPress={() => setRequestLimit((value) => value + 30)}><Text style={styles.loadMorePeopleText}>Show 30 more requests</Text></TouchableOpacity>
+            ) : null}
+            {filteredPendingRequests.length === 0 && pendingRequests.length > 0 ? <Text style={styles.noSearchResults}>No requests match this search.</Text> : null}
           </View>
         );
       case 'sent':
@@ -721,15 +785,20 @@ export default function FriendsScreen() {
                 <TouchableOpacity style={styles.emptyPanelButton} onPress={navigateToAddFriend}><Text style={styles.emptyPanelButtonText}>Add a friend</Text></TouchableOpacity>
               </View>
             ) : (
-              sentRequests.map((request) => (
+              filteredSentRequests.slice(0, requestLimit).map((request) => (
                 <FriendCard
                   key={request.id}
                   friendName={request.profileData?.name || request.toUserId}
                   friendId={request.toUserId}
                   isPending={true}
+                  onCancel={() => handleCancelSentRequest(request.id, request.profileData?.name || request.toUserId)}
                 />
               ))
             )}
+            {filteredSentRequests.length > requestLimit ? (
+              <TouchableOpacity style={styles.loadMorePeople} onPress={() => setRequestLimit((value) => value + 30)}><Text style={styles.loadMorePeopleText}>Show 30 more requests</Text></TouchableOpacity>
+            ) : null}
+            {filteredSentRequests.length === 0 && sentRequests.length > 0 ? <Text style={styles.noSearchResults}>No requests match this search.</Text> : null}
           </View>
         );
       case 'friends':
@@ -748,8 +817,10 @@ export default function FriendsScreen() {
                 <Text style={styles.emptyPanelText}>Add a friend to start sharing expenses, tracking balances and settling up.</Text>
                 <TouchableOpacity style={styles.emptyPanelButton} onPress={navigateToAddFriend}><UserPlus size={16} color="#FFFFFF" /><Text style={styles.emptyPanelButtonText}>Add a friend</Text></TouchableOpacity>
               </View>
+            ) : filteredFriends.length === 0 ? (
+              <Text style={styles.noSearchResults}>No friends match this search.</Text>
             ) : (
-              friends.map((friend) => (
+              filteredFriends.slice(0, peopleLimit).map((friend) => (
                 <FriendCard
                   key={friend.id}
                   friendName={friend.profileData?.name || friend.friendId}
@@ -762,6 +833,9 @@ export default function FriendsScreen() {
                 />
               ))
             )}
+            {filteredFriends.length > peopleLimit ? (
+              <TouchableOpacity style={styles.loadMorePeople} onPress={() => setPeopleLimit((value) => value + 30)}><Text style={styles.loadMorePeopleText}>Show 30 more friends</Text></TouchableOpacity>
+            ) : null}
           </View>
         );
     }
@@ -845,6 +919,20 @@ export default function FriendsScreen() {
               </TouchableOpacity>
             </View>
           ) : null}
+        </View>
+      ) : null}
+
+      {isSearchableArea ? (
+        <View style={styles.peopleSearch}>
+          <Search size={16} color={colors.textLight} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            style={styles.peopleSearchInput}
+            placeholder={activeTab === 'pending' ? 'Search received requests' : activeTab === 'sent' ? 'Search sent requests' : activeTab === 'settlements' ? 'Search payments, people or notes' : 'Search friends'}
+            placeholderTextColor={colors.textLight}
+            returnKeyType="search"
+          />
         </View>
       ) : null}
 
@@ -1061,6 +1149,11 @@ export default function FriendsScreen() {
 }
 
 const styles = StyleSheet.create({
+  peopleSearch: { marginHorizontal: 18, marginTop: 12, marginBottom: 4, minHeight: 43, borderRadius: 13, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 12 },
+  peopleSearchInput: { flex: 1, color: colors.text, fontSize: 12, paddingVertical: 10 },
+  loadMorePeople: { minHeight: 42, borderWidth: 1, borderColor: colors.border, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 10, backgroundColor: colors.card },
+  loadMorePeopleText: { color: colors.primary, fontSize: 11, fontWeight: '800' },
+  noSearchResults: { color: colors.textSecondary, textAlign: 'center', fontSize: 12, paddingVertical: 18 },
 
   splitHero: { borderRadius: 24, padding: 20, marginBottom: 16, overflow: 'hidden' },
   splitHeroTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },

@@ -1,7 +1,7 @@
 import Card from '@/src/components/ui/Card';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { getInvestmentPortfolio } from '@/src/services/firebase/investmentsService';
+import { deleteInvestment, getInvestmentPortfolio } from '@/src/services/firebase/investmentsService';
 import { hasStockMarketApiKey } from '@/src/services/marketData/investmentPrices';
 import { formatCurrency, formatDate } from '@/src/utils/format';
 import {
@@ -18,6 +18,8 @@ import {
   ChevronRight,
   History,
   Plus,
+  Pencil,
+  Trash2,
   Settings2,
   TrendingUp,
   Wallet,
@@ -116,6 +118,23 @@ export default function InvestmentDetailScreen() {
   );
 
   const currency = currentProfile?.currency || 'INR';
+  const hasBankTransfers = transactions.some((item) => item.type === 'bank_transfer');
+  const confirmDelete = () => {
+    if (!currentProfile || !investment) return;
+    Alert.alert(
+      'Delete investment?',
+      hasBankTransfers
+        ? 'This holding has linked bank transfers and cannot be deleted directly. Close or transfer it out first to preserve the account and transaction ledgers.'
+        : 'This will permanently remove the holding and its portfolio-only activity. Historical portfolio snapshots will be retained.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        ...(hasBankTransfers ? [] : [{ text: 'Delete', style: 'destructive' as const, onPress: async () => {
+          try { await deleteInvestment(currentProfile.id, investment.id); router.replace('/(tabs)/investments'); }
+          catch (error) { Alert.alert('Could not delete investment', error instanceof Error ? error.message : 'Please try again.'); }
+        } }]),
+      ],
+    );
+  };
   const value = Number(investment?.currentValueInPaise || 0);
   const invested = Number(investment?.investedAmountInPaise || 0);
   const unrealizedGain = value - invested;
@@ -203,6 +222,14 @@ export default function InvestmentDetailScreen() {
             {investment.symbol ? (
               <Text style={styles.symbol}>{investment.symbol}</Text>
             ) : null}
+          </View>
+          <View style={styles.headingActions}>
+            <TouchableOpacity style={styles.headingAction} onPress={() => router.push(`/investments/${investment.id}/edit`)} accessibilityLabel="Edit investment">
+              <Pencil size={16} color={colors.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.headingAction, styles.deleteAction]} onPress={confirmDelete} accessibilityLabel="Delete investment">
+              <Trash2 size={16} color={colors.danger} />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -639,6 +666,9 @@ const styles = StyleSheet.create({
   },
   headingEmoji: { fontSize: 25 },
   headingCopy: { flex: 1 },
+  headingActions: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  headingAction: { width: 36, height: 36, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
+  deleteAction: { borderColor: '#F1C7CB', backgroundColor: '#FFF5F5' },
   title: {
     fontSize: 23,
     fontWeight: '800',

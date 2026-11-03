@@ -2,7 +2,6 @@ import { db } from "@/src/firebaseConfig";
 import {
     addDoc,
     collection,
-    deleteDoc,
     doc,
     getDocs,
     query,
@@ -11,6 +10,7 @@ import {
 } from "firebase/firestore";
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useAuth } from "./AuthContext";
+import { deleteProfileData } from "@/src/services/firebase/profilesService";
 
 interface Profile {
   id: string;
@@ -126,8 +126,15 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteProfile = async (profileId: string) => {
-    const ref = doc(db, "profiles", profileId);
-    await deleteDoc(ref);
+    if (!user) throw new Error("Sign in before deleting a profile.");
+    if (profiles.length <= 1) throw new Error("Keep at least one finance profile on your account.");
+    const target = profiles.find((profile) => profile.id === profileId);
+    if (!target) throw new Error("This profile is no longer available.");
+    const replacement = profiles.find((profile) => profile.id !== profileId);
+    await deleteProfileData(profileId, user.uid);
+    if (target.isDefault && replacement) {
+      await updateDoc(doc(db, "profiles", replacement.id), { isDefault: true, updatedAt: new Date() });
+    }
     await loadProfiles();
   };
 

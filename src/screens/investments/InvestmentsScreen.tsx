@@ -5,10 +5,10 @@ import { useProfile } from '@/src/context/ProfileContext';
 import { getInvestmentPortfolio } from '@/src/services/firebase/investmentsService';
 import { formatCurrency, formatPercent, formatShortDate } from '@/src/utils/format';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, ChevronRight, History, Plus, RefreshCw, TrendingUp, Wallet } from 'lucide-react-native';
+import { ArrowDownLeft, ArrowLeftRight, ArrowUpRight, ChevronRight, History, Plus, RefreshCw, Search, TrendingUp, Wallet } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const ASSET_META: Record<string, { label: string; icon: string; color: string }> = {
@@ -38,6 +38,9 @@ export default function InvestmentsScreen() {
     portfolioXirrPercent: null,
   });
   const [loading, setLoading] = useState(true);
+  const [holdingSearch, setHoldingSearch] = useState('');
+  const [holdingTypeFilter, setHoldingTypeFilter] = useState('all');
+  const [holdingLimit, setHoldingLimit] = useState(20);
 
   const loadPortfolio = useCallback(async () => {
     if (!currentProfile) {
@@ -126,6 +129,13 @@ export default function InvestmentsScreen() {
   }, [portfolio.snapshots, currentValue]);
 
   const recentTransactions = (portfolio.transactions || []).slice(0, 4);
+  const normalizedHoldingSearch = holdingSearch.trim().toLowerCase();
+  const filteredHoldings = (portfolio.investments || []).filter((item: any) => {
+    const matchesType = holdingTypeFilter === 'all' || item.assetClass === holdingTypeFilter;
+    const searchable = [item.name, item.provider, item.symbol, item.assetClass]
+      .filter(Boolean).join(' ').toLowerCase();
+    return matchesType && (!normalizedHoldingSearch || searchable.includes(normalizedHoldingSearch));
+  });
 
   return (
     <View style={styles.screen}>
@@ -420,6 +430,32 @@ export default function InvestmentsScreen() {
           </TouchableOpacity>
         </View>
 
+        <View style={styles.holdingsSearch}>
+          <Search size={16} color={colors.textLight} />
+          <TextInput
+            value={holdingSearch}
+            onChangeText={(value) => { setHoldingSearch(value); setHoldingLimit(20); }}
+            style={styles.holdingsSearchInput}
+            placeholder="Search name, provider or symbol"
+            placeholderTextColor={colors.textLight}
+            returnKeyType="search"
+          />
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.holdingFilters}>
+          {[{ value: 'all', label: 'All assets' }, ...Object.entries(ASSET_META).map(([value, meta]) => ({ value, label: meta.label }))].map((option) => {
+            const selected = holdingTypeFilter === option.value;
+            return (
+              <TouchableOpacity
+                key={option.value}
+                style={[styles.holdingFilterChip, selected && styles.holdingFilterChipSelected]}
+                onPress={() => { setHoldingTypeFilter(option.value); setHoldingLimit(20); }}
+              >
+                <Text style={[styles.holdingFilterText, selected && styles.holdingFilterTextSelected]}>{option.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+
         {loading && !portfolio.investments?.length ? (
           <View style={styles.loading}>
             <ActivityIndicator color={colors.primary} />
@@ -427,7 +463,7 @@ export default function InvestmentsScreen() {
           </View>
         ) : null}
 
-        {(portfolio.investments || []).map((item: any) => {
+        {filteredHoldings.slice(0, holdingLimit).map((item: any) => {
           const meta = ASSET_META[item.assetClass] || ASSET_META.other;
           const itemValue = Number(item.currentValueInPaise || 0);
           const itemInvested = Number(item.investedAmountInPaise || 0);
@@ -491,6 +527,16 @@ export default function InvestmentsScreen() {
             </TouchableOpacity>
           );
         })}
+
+        {filteredHoldings.length > holdingLimit ? (
+          <TouchableOpacity style={styles.showMoreHoldings} onPress={() => setHoldingLimit((value) => value + 20)}>
+            <Text style={styles.showMoreHoldingsText}>Show 20 more holdings</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {!loading && filteredHoldings.length === 0 && (portfolio.investments || []).length > 0 ? (
+          <Text style={styles.holdingsNoResults}>No holdings match the selected search or asset type.</Text>
+        ) : null}
 
         {!loading && !(portfolio.investments || []).length ? (
           <View style={styles.emptyCard}>
@@ -840,6 +886,16 @@ const styles = StyleSheet.create({
     padding: 18,
   },
   loadingText: { color: colors.textSecondary, fontSize: 11 },
+  holdingsSearch: { minHeight: 44, marginTop: 8, marginBottom: 9, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 9, borderWidth: 1, borderColor: colors.border, borderRadius: 13, backgroundColor: colors.card },
+  holdingsSearchInput: { flex: 1, color: colors.text, fontSize: 12, paddingVertical: 9 },
+  holdingFilters: { gap: 7, paddingBottom: 12 },
+  holdingFilterChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 99, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card },
+  holdingFilterChipSelected: { borderColor: colors.primary, backgroundColor: '#F0EFFF' },
+  holdingFilterText: { color: colors.textSecondary, fontSize: 10, fontWeight: '700' },
+  holdingFilterTextSelected: { color: colors.primary, fontWeight: '900' },
+  showMoreHoldings: { alignItems: 'center', justifyContent: 'center', paddingVertical: 13, marginTop: 8, borderRadius: 13, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card },
+  showMoreHoldingsText: { color: colors.primary, fontSize: 11, fontWeight: '800' },
+  holdingsNoResults: { textAlign: 'center', color: colors.textSecondary, paddingVertical: 18, fontSize: 12 },
   holdingRow: {
     flexDirection: 'row',
     alignItems: 'center',
