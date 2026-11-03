@@ -2,14 +2,14 @@ IOS :
 
 cd ios 
 
-xcodebuild \    
-  -workspace FinanceApp.xcworkspace \
-  -scheme FinanceApp \
-  -configuration Release \
-  -destination 'generic/platform=iOS' \
-  -derivedDataPath build/ios \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+xcodebuild \
+-workspace FinanceApp.xcworkspace \
+-scheme FinanceApp \
+-configuration Release \
+-destination 'generic/platform=iOS' \
+-derivedDataPath build/ios \
+CODE_SIGNING_ALLOWED=NO \
+build
 
 mkdir -p Payload
 cp -R build/ios/Build/Products/Release-iphoneos/FinanceApp.app Payload/

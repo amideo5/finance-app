@@ -1,7 +1,7 @@
 import Card from '@/src/components/ui/Card';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
-import { getInvestmentPortfolio } from '@/src/services/firebase/investmentsService';
+import { getInvestmentLedgerPage } from '@/src/services/firebase/investmentsService';
 import { formatCurrency } from '@/src/utils/format';
 import {
   useFocusEffect,
@@ -19,7 +19,7 @@ import {
   Search,
   TrendingUp,
 } from 'lucide-react-native';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -70,39 +70,74 @@ export default function InvestmentLedgerScreen() {
   const [transactions, setTransactions] = useState<any[]>([]);
   const [investments, setInvestments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const cursorRef = useRef<Record<string, any>>({});
+  const requestVersion = useRef(0);
+  const pageLoadingRef = useRef(false);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [selectedInvestmentId, setSelectedInvestmentId] = useState(
     initialInvestmentId || 'all',
   );
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (reset = true) => {
     if (!currentProfile) {
+      requestVersion.current += 1;
+      pageLoadingRef.current = false;
+      cursorRef.current = {};
+      setTransactions([]);
+      setInvestments([]);
+      setHasMore(false);
       setLoading(false);
+      setLoadingMore(false);
       return;
     }
+    if (!reset && pageLoadingRef.current) return;
 
-    setLoading(true);
+    const requestId = ++requestVersion.current;
+    pageLoadingRef.current = true;
+    if (reset) {
+      cursorRef.current = {};
+      setTransactions([]);
+      setHasMore(false);
+      setLoading(true);
+      setLoadingMore(false);
+    } else {
+      setLoadingMore(true);
+    }
 
     try {
-      const result = await getInvestmentPortfolio(currentProfile.id);
+      const result = await getInvestmentLedgerPage(currentProfile.id, {
+        investmentId: selectedInvestmentId,
+        pageSize: 30,
+        cursors: reset ? {} : cursorRef.current,
+      });
+      if (requestId !== requestVersion.current) return;
 
-      setTransactions(result.transactions);
+      cursorRef.current = result.cursors;
       setInvestments(result.investments);
-
-      if (initialInvestmentId) {
-        setSelectedInvestmentId(initialInvestmentId);
-      }
+      setTransactions((previous) => reset ? result.transactions : [...previous, ...result.transactions]);
+      setHasMore(result.hasMore);
     } catch (error) {
-      console.error('Investment ledger load failed:', error);
+      if (requestId === requestVersion.current) {
+        console.error('Investment ledger load failed:', error);
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) {
+        pageLoadingRef.current = false;
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
-  }, [currentProfile, initialInvestmentId]);
+  }, [currentProfile, selectedInvestmentId]);
 
   useFocusEffect(
     useCallback(() => {
-      void load();
+      void load(true);
+      return () => {
+        requestVersion.current += 1;
+      };
     }, [load]),
   );
 
@@ -170,7 +205,7 @@ export default function InvestmentLedgerScreen() {
           <RefreshControl
             refreshing={loading}
             onRefresh={() => {
-              void load();
+              void load(true);
             }}
             tintColor={colors.primary}
           />
@@ -339,8 +374,7 @@ export default function InvestmentLedgerScreen() {
           <View>
             <Text style={styles.sectionTitle}>Activity history</Text>
             <Text style={styles.sectionSub}>
-              {displayed.length}{' '}
-              {displayed.length === 1 ? 'entry' : 'entries'} · newest first
+              {displayed.length} matching of {transactions.length} loaded · newest first
             </Text>
           </View>
           <Filter size={17} color={colors.textLight} />
@@ -483,6 +517,20 @@ export default function InvestmentLedgerScreen() {
             </View>
           )}
         </Card>
+
+        {hasMore ? (
+          <TouchableOpacity
+            style={styles.loadMoreButton}
+            onPress={() => void load(false)}
+            disabled={loadingMore}
+            accessibilityRole="button"
+          >
+            {loadingMore ? <ActivityIndicator size="small" color={colors.primary} /> : null}
+            <Text style={styles.loadMoreText}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</Text>
+          </TouchableOpacity>
+        ) : transactions.length > 0 ? (
+          <Text style={styles.endOfList}>You’re all caught up.</Text>
+        ) : null}
 
         <Text style={styles.footerNote}>
           Bank-to-investment transfers pair with a main-ledger expense;
@@ -688,6 +736,20 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   emptyButtonText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
+  loadMoreButton: {
+    minHeight: 46,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 12,
+  },
+  loadMoreText: { color: colors.primary, fontSize: 12, fontWeight: '800' },
+  endOfList: { color: colors.textLight, fontSize: 10, textAlign: 'center', marginTop: 13 },
   footerNote: {
     color: colors.textLight,
     fontSize: 9,

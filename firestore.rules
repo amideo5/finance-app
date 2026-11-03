@@ -333,9 +333,16 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['status', 'updatedAt']);
 
-      // The current app rejects requests by deleting them as the recipient.
+      // Recipients may reject; senders may cancel only while the request is pending.
       allow delete:
-        if signedIn() && resource.data.toUserId == request.auth.uid;
+        if signedIn()
+        && (
+          resource.data.toUserId == request.auth.uid
+          || (
+            resource.data.fromUserId == request.auth.uid
+            && resource.data.status == 'pending'
+          )
+        );
     }
 
     match /friends/{friendshipId} {

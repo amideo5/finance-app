@@ -7,7 +7,7 @@ import { useRouter } from 'expo-router';
 import { ArrowRight, History, Plus, Wallet, WalletCards } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { formatCurrency } from '@/src/utils/format';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -17,6 +17,8 @@ export default function AccountsScreen() {
   const { currentProfile } = useProfile();
   const [accounts, setAccounts] = useState<FinanceAccount[]>([]);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
 
   const linkHistoricalCash = async () => {
     if (!currentProfile) return;
@@ -54,6 +56,11 @@ export default function AccountsScreen() {
   }, [loadAccounts]);
 
   const totalBalance = accounts.reduce((total, account) => total + Number(account.balance || 0), 0);
+  const visibleAccounts = accounts.filter((account) => {
+    const matchesType = typeFilter === 'all' || account.type === typeFilter;
+    const needle = search.trim().toLowerCase();
+    return matchesType && (!needle || `${account.name || ''} ${account.type || ''} ${account.account_number || ''}`.toLowerCase().includes(needle));
+  });
 
   return (
     <View style={styles.container}>
@@ -130,16 +137,25 @@ export default function AccountsScreen() {
           </TouchableOpacity>
         </View>
 
-        {accounts.map((account) => (
+        <TextInput value={search} onChangeText={setSearch} style={styles.searchInput} placeholder="Search accounts" placeholderTextColor={colors.textSecondary} />
+        <View style={styles.filterRow}>
+          {[['all', 'All'], ['bank', 'Bank'], ['cash', 'Cash'], ['wallet', 'Wallet'], ['credit_card', 'Cards']].map(([value, label]) => (
+            <TouchableOpacity key={value} onPress={() => setTypeFilter(value)} style={[styles.filterChip, typeFilter === value && styles.filterChipActive]}>
+              <Text style={[styles.filterText, typeFilter === value && styles.filterTextActive]}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        {visibleAccounts.map((account) => (
           <AccountCard
             key={account.id}
             name={account.name}
             type={account.type}
             balance={account.balance}
             accountNumber={account.account_number ?? undefined}
+            onPress={() => router.push(`/accounts/add?accountId=${account.id}`)}
           />
         ))}
-        {accounts.length === 0 && !loading ? (
+        {visibleAccounts.length === 0 && !loading ? (
           <View style={styles.emptyCard}>
             <View style={styles.emptyIcon}><WalletCards size={25} color={colors.primary} /></View>
             <Text style={styles.emptyTitle}>No accounts yet</Text>
@@ -155,6 +171,12 @@ export default function AccountsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   pageContent: { paddingHorizontal: 18, paddingTop: 0, paddingBottom: 36 },
+  searchInput: { height: 44, borderRadius: 13, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, color: colors.text, paddingHorizontal: 13, marginBottom: 10 },
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 14 },
+  filterChip: { borderRadius: 99, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, paddingHorizontal: 11, paddingVertical: 7 },
+  filterChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  filterText: { color: colors.textSecondary, fontSize: 10, fontWeight: '700' },
+  filterTextActive: { color: '#FFFFFF' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 26, paddingBottom: 22 },
   headerCopy: { flex: 1, paddingRight: 12 },
   eyebrow: { color: colors.primary, fontSize: 9, letterSpacing: 1.6, fontWeight: '800', marginBottom: 5 },

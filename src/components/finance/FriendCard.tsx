@@ -11,6 +11,7 @@ interface FriendCardProps {
   isPending?: boolean;
   onAccept?: () => void;
   onReject?: () => void;
+  onCancel?: () => void;
 }
 
 export default function FriendCard({
@@ -20,6 +21,7 @@ export default function FriendCard({
   isPending = false,
   onAccept,
   onReject,
+  onCancel,
 }: FriendCardProps) {
   const canRespond = Boolean(onAccept || onReject);
   const initial = friendName.trim().charAt(0).toUpperCase() || 'F';
@@ -63,7 +65,14 @@ export default function FriendCard({
                 ) : null}
               </>
             ) : (
-              <View style={styles.waitingPill}><Clock3 size={13} color={colors.primary} /><Text style={styles.waitingText}>Pending</Text></View>
+              <>
+                <View style={styles.waitingPill}><Clock3 size={13} color={colors.primary} /><Text style={styles.waitingText}>Pending</Text></View>
+                {onCancel ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Cancel request to ${friendName}`} style={[styles.iconButton, styles.rejectButton]} onPress={onCancel} activeOpacity={0.8}>
+                    <X size={17} color={colors.danger} />
+                  </TouchableOpacity>
+                ) : null}
+              </>
             )
           ) : (
             <>

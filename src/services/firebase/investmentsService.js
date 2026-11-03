@@ -1,12 +1,20 @@
 import {
+  where,
   collection,
+  deleteDoc,
+  documentId,
   doc,
   getDoc,
   getDocs,
+  limit,
+  orderBy,
+  query,
+  startAfter,
   runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
 } from "firebase/firestore";
 import { auth, db } from "../../firebaseConfig";
 import {
@@ -989,11 +997,11 @@ export const getInvestmentPortfolio = async (profileId) => {
     rawInvestments.map(async (investment) => {
       const txSnapshot = await getDocs(ledgerCollection(profileId, investment.id));
       return txSnapshot.docs.map((txDoc) => ({
+        ...txDoc.data(),
         id: txDoc.id,
         investmentId: investment.id,
         investmentName: investment.name,
         assetClass: investment.assetClass,
-        ...txDoc.data(),
       }));
     }),
   );
@@ -1155,6 +1163,144 @@ export const getInvestmentPortfolio = async (profileId) => {
     totalReturnInPaise: enrichedInvestments.reduce((sum, item) => sum + item.totalReturnInPaise, 0),
     portfolioXirrPercent,
   };
+};
+
+/**
+ * Read an investment ledger page without loading every event in every holding.
+ * Each holding is queried independently and the page is merged by date. Cursors
+ * are retained per holding so a merged page never skips events from a slower stream.
+ */
+export const getInvestmentLedgerPage = async (profileId, options = {}) => {
+  if (!profileId) return { investments: [], transactions: [], cursors: {}, hasMore: false };
+
+  const pageSize = Math.min(100, Math.max(1, Number(options.pageSize) || 30));
+  const selectedInvestmentId = options.investmentId || "all";
+  const cursors = options.cursors || {};
+  const userId = auth.currentUser?.uid;
+
+  try {
+    await processDueRecurringContributions(profileId, userId);
+  } catch (error) {
+    console.warn("Scheduled RD processing paused:", error instanceof Error ? error.message : error);
+  }
+
+  let holdingsSnapshot = await getDocs(investmentCollection(profileId));
+  try {
+    const wroteMarketValuation = await refreshDueMarketValuations(profileId, holdingsSnapshot.docs);
+    if (wroteMarketValuation) holdingsSnapshot = await getDocs(investmentCollection(profileId));
+  } catch (error) {
+    console.warn("Daily market valuation skipped:", error instanceof Error ? error.message : error);
+  }
+
+  const investments = holdingsSnapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+  const selectedHoldings = selectedInvestmentId === "all"
+    ? investments
+    : investments.filter((item) => item.id === selectedInvestmentId);
+
+  const streams = await Promise.all(selectedHoldings.map(async (holding) => {
+    /** @type {import("firebase/firestore").QueryConstraint[]} */
+    const constraints = [orderBy("date", "desc"), orderBy(documentId(), "desc")];
+    if (cursors[holding.id]) constraints.push(startAfter(cursors[holding.id]));
+    constraints.push(limit(pageSize + 1));
+    const snapshot = await getDocs(query(ledgerCollection(profileId, holding.id), ...constraints));
+    return { holding, docs: snapshot.docs };
+  }));
+
+  const merged = streams.flatMap(({ holding, docs }) => docs.map((snapshot) => ({
+    id: snapshot.id,
+    ...snapshot.data(),
+    investmentId: holding.id,
+    investmentName: holding.name || "Investment",
+    assetClass: holding.assetClass || "other",
+    _snapshot: snapshot,
+  }))).sort((a, b) => {
+    const dateOrder = String(b.date || "").localeCompare(String(a.date || ""));
+    if (dateOrder) return dateOrder;
+    const holdingOrder = String(b.investmentId).localeCompare(String(a.investmentId));
+    return holdingOrder || String(b.id).localeCompare(String(a.id));
+  });
+
+  const pageRows = merged.slice(0, pageSize);
+  const nextCursors = { ...cursors };
+  const lastConsumedByHolding = new Map();
+  pageRows.forEach((row) => lastConsumedByHolding.set(row.investmentId, row._snapshot));
+  lastConsumedByHolding.forEach((snapshot, investmentId) => {
+    nextCursors[investmentId] = snapshot;
+  });
+  const hasMore = merged.length > pageSize || streams.some(({ docs }) => docs.length > pageSize);
+
+  return {
+    investments,
+    transactions: pageRows.map(({ _snapshot, ...row }) => row),
+    cursors: nextCursors,
+    hasMore,
+  };
+};
+
+/** Update descriptive fields on a holding without rewriting its financial ledger. */
+export const updateInvestmentDetails = async (profileId, investmentId, details) => {
+  if (!profileId || !investmentId) throw new Error("Choose an investment to update.");
+  const name = String(details.name || "").trim();
+  if (!name) throw new Error("Enter an investment name.");
+  const assetRef = doc(investmentCollection(profileId), investmentId);
+  const snapshot = await getDoc(assetRef);
+  if (!snapshot.exists()) throw new Error("This investment no longer exists.");
+  await updateDoc(assetRef, {
+    name,
+    provider: String(details.provider || "").trim() || null,
+    symbol: String(details.symbol || "").trim() || null,
+    notes: String(details.notes || "").trim() || null,
+    updatedAt: serverTimestamp(),
+  });
+  return true;
+};
+
+/**
+ * Remove a holding only when it has no paired bank-transfer ledger rows.
+ * Paired transfers need an explicit close/reversal workflow; deleting just one
+ * side would orphan the bank transaction and distort account balances.
+ */
+export const deleteInvestment = async (profileId, investmentId) => {
+  if (!profileId || !investmentId) throw new Error("Choose an investment to delete.");
+  const assetRef = doc(investmentCollection(profileId), investmentId);
+  const [assetSnapshot, assetDocs, ledgerSnapshot, linkedMainTransactions] = await Promise.all([
+    getDoc(assetRef),
+    getDocs(investmentCollection(profileId)),
+    getDocs(ledgerCollection(profileId, investmentId)),
+    getDocs(query(collection(db, "profiles", profileId, "transactions"), where("investmentId", "==", investmentId))),
+  ]);
+  if (!assetSnapshot.exists()) return true;
+  const asset = assetSnapshot.data();
+  if (
+    asset.initialFundingSource === "bank_account"
+    || ledgerSnapshot.docs.some((item) => item.data().type === "bank_transfer")
+    || !linkedMainTransactions.empty
+  ) {
+    throw new Error("This holding has bank-linked transaction activity. Use the transfer-out / close process first; deleting it directly would break the paired account and transaction ledgers.");
+  }
+
+  for (let offset = 0; offset < ledgerSnapshot.docs.length; offset += 450) {
+    const batch = writeBatch(db);
+    ledgerSnapshot.docs.slice(offset, offset + 450).forEach((item) => batch.delete(item.ref));
+    await batch.commit();
+  }
+  await deleteDoc(assetRef);
+
+  const remaining = assetDocs.docs.filter((item) => item.id !== investmentId);
+  const totalValueInPaise = remaining.reduce((sum, item) => sum + readPaise(item.data(), "currentValueInPaise", "currentValue"), 0);
+  const totalInvestedInPaise = remaining.reduce((sum, item) => sum + readPaise(item.data(), "investedAmountInPaise", "investedAmount"), 0);
+  const date = todayKey();
+  const dailySnapshotRef = doc(snapshotCollection(profileId), `daily_${date.replace(/-/g, "")}`);
+  await setDoc(dailySnapshotRef, {
+    date,
+    totalValueInPaise,
+    totalInvestedInPaise,
+    totalValue: totalValueInPaise / 100,
+    totalInvested: totalInvestedInPaise / 100,
+    createdAt: serverTimestamp(),
+    source: "holding_deleted",
+  });
+  return true;
 };
 
 /** Update growth terms and quote-provider settings for an existing holding. */
@@ -1491,7 +1637,7 @@ export const transferFromInvestment = async (profileId, userId, data) => {
       const executionPrice = Number(data.unitPrice || asset.lastMarketPrice || asset.averageBuyPrice);
       marketSale = calculateMarketSell({
         assetClass: asset.assetClass,
-        requestedProceedsInPaise,
+        requestedProceedsInPaise: requestedAmountInPaise,
         unitPrice: executionPrice,
         heldQuantity: Number(asset.units || 0),
         costBasisInPaise: oldInvestedInPaise,

@@ -1,7 +1,9 @@
 
 import {
   collection,
+  deleteDoc,
   doc,
+  getDoc,
   getDocs,
   query,
   where,
@@ -33,9 +35,9 @@ export const addAccount = async (profileId, data) => {
 
   await setDoc(accountRef, {
     ...data,
-    openingBalance,
+    openingBalance: toPaise(openingBalance) / 100,
     openingBalanceInPaise: toPaise(openingBalance),
-    balance,
+    balance: toPaise(balance) / 100,
     balanceInPaise: toPaise(balance),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -169,4 +171,94 @@ export const assignHistoricalTransactions = async (
   }
 
   return { updated, failed };
+};
+
+
+/** Update account metadata without rewriting its transaction-derived balance. */
+export const updateAccount = async (profileId, accountId, updates) => {
+  if (!profileId || !accountId) throw new Error("Choose an account to update.");
+  const name = String(updates.name || "").trim();
+  if (!name) throw new Error("Enter an account name.");
+  const ref = doc(db, "profiles", profileId, "accounts", accountId);
+  const existingSnapshot = await getDoc(ref);
+  if (!existingSnapshot.exists()) throw new Error("This account no longer exists.");
+  const existing = existingSnapshot.data();
+
+  if (updates.type && existing.type !== updates.type) {
+    const [linkedTransactions, investments] = await Promise.all([
+      getDocs(query(collection(db, "profiles", profileId, "transactions"), where("accountId", "==", accountId))),
+      getDocs(collection(db, "profiles", profileId, "investments")),
+    ]);
+    if (existing.type === "cash" && String(existing.name || "").toLowerCase() === "cash") {
+      throw new Error("The system Cash account type cannot be changed.");
+    }
+    if (!linkedTransactions.empty) {
+      throw new Error("Account type cannot be changed after it has transaction history. You can still update the name and account label.");
+    }
+    for (const investmentDoc of investments.docs) {
+      const ledger = await getDocs(collection(db, "profiles", profileId, "investments", investmentDoc.id, "transactions"));
+      if (ledger.docs.some((entry) => entry.data().accountId === accountId || entry.data().sourceAccountId === accountId || entry.data().destinationAccountId === accountId)) {
+        throw new Error("Account type cannot be changed while an investment ledger references it.");
+      }
+      const investment = investmentDoc.data();
+      if (investment.recurringContributionSourceAccountId === accountId || investment.initialFundingAccountId === accountId) {
+        throw new Error("Account type cannot be changed while an investment funding setting references it.");
+      }
+    }
+  }
+
+  await updateDoc(ref, {
+    name,
+    ...(updates.type ? { type: updates.type } : {}),
+    account_number: String(updates.account_number || "").trim() || null,
+    ...(updates.icon ? { icon: updates.icon } : {}),
+    updatedAt: serverTimestamp(),
+  });
+  return true;
+};
+
+/**
+ * Delete only unreferenced accounts. A financial account with transaction or
+ * investment history must be reassigned first; silently deleting it would
+ * strand ledger references and make balances impossible to reconcile.
+ */
+export const deleteAccount = async (profileId, accountId) => {
+  if (!profileId || !accountId) throw new Error("Choose an account to delete.");
+  const accountRef = doc(db, "profiles", profileId, "accounts", accountId);
+  const [currentAccount, cashAccounts] = await Promise.all([
+    getDoc(accountRef),
+    getDocs(query(collection(db, "profiles", profileId, "accounts"), where("type", "==", "cash"))),
+  ]);
+  if (!currentAccount.exists()) return true;
+  const accountData = currentAccount.data();
+  const isCashAccount = cashAccounts.docs.some((item) => item.id === accountId && String(item.data().name || "").toLowerCase() === "cash");
+  if (isCashAccount) throw new Error("The system Cash account cannot be deleted.");
+  const balanceInPaise = Number.isSafeInteger(accountData.balanceInPaise)
+    ? accountData.balanceInPaise
+    : toPaise(accountData.balance);
+  if (balanceInPaise !== 0) {
+    throw new Error(`This account still has a balance of ₹${(balanceInPaise / 100).toFixed(2)}. Move the remaining funds out before deleting it.`);
+  }
+
+  const [transactions, investments] = await Promise.all([
+    getDocs(query(collection(db, "profiles", profileId, "transactions"), where("accountId", "==", accountId))),
+    getDocs(collection(db, "profiles", profileId, "investments")),
+  ]);
+  if (!transactions.empty) {
+    throw new Error(`This account is linked to ${transactions.size} transaction(s). Reassign or remove those records before deleting the account.`);
+  }
+
+  for (const investmentDoc of investments.docs) {
+    const investment = investmentDoc.data();
+    if (investment.recurringContributionSourceAccountId === accountId || investment.initialFundingAccountId === accountId) {
+      throw new Error(`This account is linked to ${investment.name || "an investment"}. Update the investment funding settings before deleting it.`);
+    }
+    const ledger = await getDocs(collection(db, "profiles", profileId, "investments", investmentDoc.id, "transactions"));
+    if (ledger.docs.some((entry) => entry.data().accountId === accountId || entry.data().sourceAccountId === accountId || entry.data().destinationAccountId === accountId)) {
+      throw new Error(`This account appears in the ${investment.name || "investment"} ledger. Keep the account or reconcile that investment first.`);
+    }
+  }
+
+  await deleteDoc(accountRef);
+  return true;
 };

@@ -3,6 +3,7 @@ import { doc, getDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -20,6 +21,8 @@ import {
   CircleAlert,
   CreditCard,
   FileText,
+  Pencil,
+  Trash2,
   ReceiptText,
   RotateCw,
   UsersRound,
@@ -30,6 +33,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '@/src/constants/colors';
 import { useProfile } from '@/src/context/ProfileContext';
 import { db } from '@/src/firebaseConfig';
+import { deleteTransaction } from '@/src/services/firebase/transactionsService';
+import { getUserSplits } from '@/src/services/firebase/splitService';
 
 type TransactionRecord = {
   amount?: number;
@@ -44,6 +49,12 @@ type TransactionRecord = {
   accountId?: string | null;
   investmentTransferId?: string;
   investmentTransferDirection?: 'in' | 'out';
+  investmentId?: string;
+  investmentLedgerEntryId?: string;
+  splitId?: string;
+  settlementId?: string;
+  friendSettlementId?: string;
+  serverGenerated?: boolean;
 };
 
 function formatDate(value?: string) {
@@ -86,6 +97,7 @@ export default function TransactionDetail() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  const [isLockedSplitSource, setIsLockedSplitSource] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -94,6 +106,7 @@ export default function TransactionDetail() {
       setLoading(true);
       setLoadError(null);
       setTransaction(null);
+      setIsLockedSplitSource(false);
 
       if (!currentProfile?.id || !transactionId) {
         setLoadError('This transaction is unavailable for the current profile.');
@@ -109,11 +122,24 @@ export default function TransactionDetail() {
           'transactions',
           transactionId,
         );
-        const snapshot = await getDoc(ref);
+        const [snapshot, splitRows] = await Promise.all([
+          getDoc(ref),
+          currentProfile.userId
+            ? getUserSplits(currentProfile.userId).catch((error) => {
+                console.warn('Could not inspect split links for transaction actions:', error);
+                return [];
+              })
+            : Promise.resolve([]),
+        ]);
         if (!active) return;
 
         if (snapshot.exists()) {
           setTransaction(snapshot.data() as TransactionRecord);
+          setIsLockedSplitSource(splitRows.some((split) =>
+            split.sourceProfileId === currentProfile.id
+            && split.sourceTransactionId === transactionId
+            && !['cancelled', 'released'].includes(String(split.status || '').toLowerCase())
+          ));
         } else {
           setLoadError('We couldn’t find this transaction. It may have been removed.');
         }
@@ -139,7 +165,27 @@ export default function TransactionDetail() {
   );
   const isInvestmentTransfer = transaction?.kind === 'investment-transfer' || Boolean(transaction?.investmentTransferId);
   const isIncome = transaction?.type === 'income';
+  const canManage = Boolean(transaction && !isLockedSplitSource && !transaction.kind && !transaction.splitId && !transaction.settlementId && !transaction.friendSettlementId && !transaction.investmentTransferId && !transaction.investmentId && !transaction.serverGenerated);
   const title = transaction?.title || transaction?.category || 'Transaction';
+
+  const confirmDelete = () => {
+    if (!currentProfile || !transactionId || !canManage) return;
+    Alert.alert(
+      'Delete transaction?',
+      'This will permanently remove the entry and reverse its effect on the linked account balance.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: async () => {
+          try {
+            await deleteTransaction(currentProfile.id, transactionId);
+            router.replace('/(tabs)/transactions');
+          } catch (error) {
+            Alert.alert('Could not delete transaction', error instanceof Error ? error.message : 'Please try again.');
+          }
+        } },
+      ],
+    );
+  };
 
   if (loading) {
     return (
@@ -204,9 +250,18 @@ export default function TransactionDetail() {
             <Text style={styles.eyebrow}>YOUR ACTIVITY</Text>
             <Text style={styles.screenTitle}>Transaction details</Text>
           </View>
-          <View style={styles.topBarIcon}>
-            <ReceiptText size={20} color={colors.primary} />
-          </View>
+          {canManage ? (
+            <View style={styles.topBarActions}>
+              <TouchableOpacity style={styles.topBarAction} onPress={() => router.push(`/transactions/add-expense?transactionId=${transactionId}`)} accessibilityLabel="Edit transaction">
+                <Pencil size={17} color={colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.topBarAction, styles.deleteAction]} onPress={confirmDelete} accessibilityLabel="Delete transaction">
+                <Trash2 size={17} color={colors.danger} />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.topBarIcon}><ReceiptText size={20} color={colors.primary} /></View>
+          )}
         </View>
 
         <LinearGradient
@@ -338,6 +393,9 @@ const styles = StyleSheet.create({
   backText: { color: colors.text, fontSize: 14, fontWeight: '600' },
   stateBackButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 13, paddingVertical: 10, borderRadius: 14, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
   topBarCopy: { flex: 1 },
+  topBarActions: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  topBarAction: { width: 38, height: 38, borderRadius: 13, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
+  deleteAction: { backgroundColor: '#FFF3F4', borderColor: '#F5D0D4' },
   eyebrow: { color: colors.primary, fontWeight: '800', letterSpacing: 1.3, fontSize: 10 },
   screenTitle: { color: colors.text, fontSize: 21, fontWeight: '800', marginTop: 3 },
   topBarIcon: {
