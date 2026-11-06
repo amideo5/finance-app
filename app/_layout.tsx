@@ -22,7 +22,7 @@ function RootNavigation() {
   const router = useRouter();
   const [showPinRecovery, setShowPinRecovery] = useState(false);
   // Keep all app screens covered while Firebase and secure lock settings hydrate.
-  const isLocked = loading || Boolean(user && pinConfigured && !isAppUnlocked);
+  const isLocked = loading || Boolean(user && (!pinConfigured || !isAppUnlocked));
 
   useEffect(() => {
     if (loading) return;
@@ -90,6 +90,11 @@ function RootNavigation() {
                 setShowPinRecovery(false);
                 router.replace('/settings/pin');
               }}
+            />
+          ) : !pinConfigured ? (
+            <PinLockScreen
+              mode="setup"
+              onSuccess={unlockApp}
             />
           ) : (
             <PinLockScreen
