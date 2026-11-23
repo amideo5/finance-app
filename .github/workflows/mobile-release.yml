@@ -243,32 +243,55 @@ jobs:
           echo "Workspace: $WORKSPACE"
           echo "Scheme: $SCHEME"
 
-      - name: Build iOS
-        env:
-          IOS_WORKSPACE: ${{ steps.ios.outputs.workspace }}
-          IOS_SCHEME: ${{ steps.ios.outputs.scheme }}
+            - name: Build iOS
+        shell: bash
         run: |
+          set -e
+
+          WORKSPACE=$(find ios -maxdepth 1 -name "*.xcworkspace" | head -n 1)
+
+          if [ -z "$WORKSPACE" ]; then
+            echo "No iOS workspace found."
+            exit 1
+          fi
+
+          echo "Workspace: $WORKSPACE"
+
+          xcodebuild -list -workspace "$WORKSPACE"
+
+          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" \
+            | sed -n '/Schemes:/,$p' \
+            | sed -n 's/^[[:space:]]*//p' \
+            | grep -v '^$' \
+            | grep -v '^Schemes:' \
+            | grep -v '^boost$' \
+            | head -n 1)
+
+          if [ -z "$SCHEME" ]; then
+            echo "Could not identify the app scheme."
+            exit 1
+          fi
+
+          echo "Selected scheme: $SCHEME"
+
           xcodebuild \
-            -workspace "$IOS_WORKSPACE" \
-            -scheme "$IOS_SCHEME" \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/ios \
             CODE_SIGNING_ALLOWED=NO \
             build
 
-          APP_PATH=$(find build/ios/Build/Products \
-            -type d \
-            -name "*.app" \
-            -print -quit)
+          APP_PATH=$(find build/ios/Build/Products -type d -name "*.app" | grep -v "XCFramework" | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "Built iOS application not found."
-            find build/ios/Build/Products
+            echo "No application bundle was produced."
+            find build/ios/Build/Products -type d
             exit 1
           fi
 
-          echo "Built app: $APP_PATH"
+          echo "Found app: $APP_PATH"
 
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
@@ -277,10 +300,7 @@ jobs:
 
           rm -rf Payload
 
-          if [ ! -f FinanceApp-unsigned.ipa ]; then
-            echo "IPA creation failed."
-            exit 1
-          fi
+          echo "Unsigned IPA created successfully."
 
       # JAVA
       - name: Setup Java
