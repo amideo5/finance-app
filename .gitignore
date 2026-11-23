@@ -19,9 +19,9 @@ local.properties
 *.iml
 
 # Android Keystores (Uncomment if you store them inside the project, but NEVER commit production keys)
-# *.jks
-# *.keystore
-# !android/app/debug.keystore
+*.jks
+*.keystore
+!android/app/debug.keystore
 credentials.json
 
 # -------------------------------------------------------------------
