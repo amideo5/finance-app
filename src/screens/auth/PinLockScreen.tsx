@@ -99,7 +99,7 @@ export default function PinLockScreen({
             <Text style={styles.lockEmoji}>🔒</Text>
           </View>
           <Text style={styles.title}>
-            {mode === 'setup' ? (step === 'enter' ? 'Set Your PIN' : 'Confirm Your PIN') : 'Unlock Finance App'}
+            {mode === 'setup' ? (step === 'enter' ? 'Set Your PIN' : 'Confirm Your PIN') : 'Unlock App'}
           </Text>
           <Text style={styles.subtitle}>
             {mode === 'setup'

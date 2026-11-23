@@ -24,7 +24,10 @@
       }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      }
     },
     "friends-android": {
       "extends": "production",

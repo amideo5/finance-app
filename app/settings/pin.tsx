@@ -36,7 +36,7 @@ export default function PinSettingsScreen() {
       });
       if (result.success) {
         await setBiometricEnabled(true);
-        Alert.alert('Biometric unlock enabled', 'You can now unlock Finance App using biometrics.');
+        Alert.alert('Biometric unlock enabled', 'You can now unlock App using biometrics.');
       }
     } catch (error) {
       console.error('Unable to enable biometric unlock:', error);
@@ -57,7 +57,7 @@ export default function PinSettingsScreen() {
   const handleDisablePin = async () => {
     try {
       await removePin();
-      Alert.alert('App lock disabled', 'Your Finance App will no longer ask for a PIN.');
+      Alert.alert('App lock disabled', 'Your App will no longer ask for a PIN.');
       router.back();
     } catch (error) {
       Alert.alert('Unable to disable app lock', error instanceof Error ? error.message : 'Please try again.');
@@ -71,7 +71,7 @@ export default function PinSettingsScreen() {
         onCancel={pinConfigured ? () => setFlow('settings') : () => router.back()}
         onSuccess={() => {
           setFlow('settings');
-          Alert.alert('PIN enabled', 'Your Finance App is now protected by your 6-digit PIN.');
+          Alert.alert('PIN enabled', 'Your App is now protected by your 6-digit PIN.');
         }}
       />
     );
