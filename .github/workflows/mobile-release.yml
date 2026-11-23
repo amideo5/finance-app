@@ -26,229 +26,143 @@ jobs:
     runs-on: macos-latest
 
     steps:
+      # --------------------------------------------------
       # CHECKOUT
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # --------------------------------------------------
       # NODE
+      # --------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      # VERSION
-      - name: Determine next release version
+      # --------------------------------------------------
+      # VERSION MANAGEMENT
+      # --------------------------------------------------
+      - name: Calculate release version
         id: version
-        env:
-          RELEASE_TYPE: ${{ inputs.release_type }}
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import subprocess
-          import re
-          import os
+          set -euo pipefail
 
-          tags = subprocess.check_output(
-              ["git", "tag", "--list"],
-              text=True
-          ).splitlines()
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
 
-          versions = []
+          LATEST_TAG=$(git tag --list \
+            --sort=-version:refname \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -n 1 || true)
 
-          for tag in tags:
-              tag = tag.removeprefix("v")
+          if [ -z "$LATEST_TAG" ]; then
+            CURRENT_VERSION="0.0.0"
+          else
+            CURRENT_VERSION="${LATEST_TAG#v}"
+          fi
 
-              match = re.fullmatch(
-                  r"(\d+)\.(\d+)\.(\d+)",
-                  tag
-              )
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
-              if match:
-                  versions.append(
-                      tuple(map(int, match.groups()))
-                  )
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
 
-          if not versions:
-              raise SystemExit(
-                  "No semantic version tags found. "
-                  "Create your first Git tag before running this workflow."
-              )
+          case "$RELEASE_TYPE" in
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            *)
+              echo "Invalid release type: $RELEASE_TYPE"
+              exit 1
+              ;;
+          esac
 
-          major, minor, patch = max(versions)
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
 
-          release_type = os.environ["RELEASE_TYPE"]
+          echo "New version: $NEW_VERSION"
+          echo "Android versionCode: $VERSION_CODE"
 
-          if release_type == "patch":
-              patch += 1
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
-          elif release_type == "minor":
-              minor += 1
-              patch = 0
-
-          elif release_type == "major":
-              major += 1
-              minor = 0
-              patch = 0
-
-          else:
-              raise SystemExit("Invalid release type")
-
-          version = f"{major}.{minor}.{patch}"
-
-          # Android versionCode.
-          # Assumes minor and patch remain below 1000.
-          version_code = major * 1000000 + minor * 1000 + patch
-
-          print("Previous version:", max(versions))
-          print("New version:", version)
-          print("Android version code:", version_code)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"version={version}\n")
-              f.write(f"version_code={version_code}\n")
-          PY
-
-      # UPDATE EXPO APP VERSION
-      - name: Update app version
+      - name: Update app.json
+        shell: bash
         env:
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          ANDROID_VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
         run: |
-          python3 - <<'PY'
+          set -euo pipefail
+
+          python3 <<'PY'
           import json
           import os
 
           path = "app.json"
 
-          if not os.path.exists(path):
-              raise SystemExit(
-                  "app.json not found. "
-                  "This workflow currently expects app.json."
-              )
-
-          with open(path, "r") as f:
+          with open(path, "r", encoding="utf-8") as f:
               data = json.load(f)
 
           expo = data.setdefault("expo", {})
 
-          expo["version"] = os.environ["APP_VERSION"]
+          expo["version"] = os.environ["NEW_VERSION"]
 
           android = expo.setdefault("android", {})
+          android["versionCode"] = int(os.environ["VERSION_CODE"])
 
-          android["versionCode"] = int(
-              os.environ["ANDROID_VERSION_CODE"]
-          )
-
-          with open(path, "w") as f:
+          with open(path, "w", encoding="utf-8") as f:
               json.dump(data, f, indent=2)
               f.write("\n")
 
-          print("Expo version updated.")
+          print("Updated app.json")
           PY
 
-      # VERIFY EXPO CONFIG
-      - name: Verify Expo configuration
-        env:
-          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-          EXPECTED_VERSION_CODE: ${{ steps.version.outputs.version_code }}
-        run: |
-          npx expo config --json > expo-config.json
+      - name: Validate Expo configuration
+        run: npx expo config --json
 
-          python3 - <<'PY'
-          import json
-          import os
-
-          with open("expo-config.json") as f:
-              config = json.load(f)
-
-          version = config.get("version")
-          version_code = config.get("android", {}).get("versionCode")
-
-          expected_version = os.environ["EXPECTED_VERSION"]
-          expected_version_code = int(
-              os.environ["EXPECTED_VERSION_CODE"]
-          )
-
-          print("Resolved Expo version:", version)
-          print("Resolved Android versionCode:", version_code)
-
-          if version != expected_version:
-              raise SystemExit(
-                  f"Expo version mismatch: {version} != {expected_version}"
-              )
-
-          if version_code != expected_version_code:
-              raise SystemExit(
-                  "Android versionCode mismatch: "
-                  f"{version_code} != {expected_version_code}"
-              )
-
-          print("Expo configuration verified.")
-          PY
-
+      # --------------------------------------------------
       # EXPO PREBUILD
+      # --------------------------------------------------
       - name: Generate native projects
         run: npx expo prebuild --platform all --no-install
 
-      # IOS
-      - name: Install CocoaPods
+      # --------------------------------------------------
+      # IOS DEPENDENCIES
+      # --------------------------------------------------
+      - name: Install iOS dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           cd ios
           pod install
-          cd ..
 
-      - name: Discover iOS workspace and scheme
-        id: ios
+      # --------------------------------------------------
+      # IOS BUILD AND IPA PACKAGING
+      # --------------------------------------------------
+      - name: Build iOS and package IPA
+        shell: bash
         run: |
+          set -euo pipefail
+
           WORKSPACE=$(find ios -maxdepth 1 \
             -name "*.xcworkspace" \
             -print -quit)
-
-          if [ -z "$WORKSPACE" ]; then
-            echo "No iOS workspace found."
-            exit 1
-          fi
-
-          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
-
-          xcodebuild -list -json -workspace "$WORKSPACE" \
-            > xcode-list.json
-
-          SCHEME=$(python3 - <<'PY'
-          import json
-
-          with open("xcode-list.json") as f:
-              data = json.load(f)
-
-          schemes = data.get("workspace", {}).get("schemes", [])
-
-          if not schemes:
-              raise SystemExit("No Xcode schemes found.")
-
-          preferred = "FinanceApp"
-
-          if preferred in schemes:
-              print(preferred)
-          else:
-              print(schemes[0])
-          PY
-          )
-
-          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
-
-          echo "Workspace: $WORKSPACE"
-          echo "Scheme: $SCHEME"
-
-            - name: Build iOS
-        shell: bash
-        run: |
-          set -e
-
-          WORKSPACE=$(find ios -maxdepth 1 -name "*.xcworkspace" | head -n 1)
 
           if [ -z "$WORKSPACE" ]; then
             echo "No iOS workspace found."
@@ -259,277 +173,275 @@ jobs:
 
           xcodebuild -list -workspace "$WORKSPACE"
 
-          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" \
-            | sed -n '/Schemes:/,$p' \
-            | sed -n 's/^[[:space:]]*//p' \
-            | grep -v '^$' \
-            | grep -v '^Schemes:' \
-            | grep -v '^boost$' \
-            | head -n 1)
+          WORKSPACE_NAME=$(basename "$WORKSPACE" .xcworkspace)
 
-          if [ -z "$SCHEME" ]; then
-            echo "Could not identify the app scheme."
+          SCHEMES=$(xcodebuild -list \
+            -workspace "$WORKSPACE" 2>&1)
+
+          echo "$SCHEMES"
+
+          if echo "$SCHEMES" | grep -Eq \
+            "^[[:space:]]*${WORKSPACE_NAME}[[:space:]]*$"; then
+            APP_SCHEME="$WORKSPACE_NAME"
+          else
+            echo "Expected app scheme '$WORKSPACE_NAME' was not found."
+            echo "Available schemes:"
+            echo "$SCHEMES"
             exit 1
           fi
 
-          echo "Selected scheme: $SCHEME"
+          echo "Building scheme: $APP_SCHEME"
 
           xcodebuild \
             -workspace "$WORKSPACE" \
-            -scheme "$SCHEME" \
+            -scheme "$APP_SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build/ios \
+            -derivedDataPath "$PWD/build/ios" \
             CODE_SIGNING_ALLOWED=NO \
             build
 
-          APP_PATH=$(find build/ios/Build/Products -type d -name "*.app" | grep -v "XCFramework" | head -n 1)
+          PRODUCTS_DIR="$PWD/build/ios/Build/Products/Release-iphoneos"
+
+          APP_PATH=$(find "$PRODUCTS_DIR" \
+            -maxdepth 1 \
+            -type d \
+            -name "*.app" \
+            -print -quit)
 
           if [ -z "$APP_PATH" ]; then
-            echo "No application bundle was produced."
-            find build/ios/Build/Products -type d
+            echo "Build succeeded but application .app was not found."
+            echo "Products directory contents:"
+            find "$PRODUCTS_DIR" -maxdepth 4
             exit 1
           fi
 
-          echo "Found app: $APP_PATH"
+          echo "Application found: $APP_PATH"
 
+          rm -rf Payload
           mkdir -p Payload
+
           cp -R "$APP_PATH" Payload/
+
+          rm -f FinanceApp-unsigned.ipa
 
           zip -r FinanceApp-unsigned.ipa Payload
 
           rm -rf Payload
 
-          echo "Unsigned IPA created successfully."
+          if [ ! -s FinanceApp-unsigned.ipa ]; then
+            echo "IPA packaging failed."
+            exit 1
+          fi
 
-      # JAVA
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
+          echo "IPA successfully packaged."
 
-      # ANDROID KEYSTORE
-      - name: Configure Android signing key
+      # --------------------------------------------------
+      # ANDROID SIGNING
+      # --------------------------------------------------
+      - name: Decode Android keystore
+        shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
+          set -euo pipefail
+
           if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "ANDROID_KEYSTORE_BASE64 secret is missing."
             exit 1
           fi
 
-          mkdir -p android/app
-
           echo "$ANDROID_KEYSTORE_BASE64" \
             | base64 -D \
-            > android/app/financeapp-release.keystore
+            > android/app/release.keystore
 
-          if [ ! -s android/app/financeapp-release.keystore ]; then
-            echo "Keystore file is empty."
-            exit 1
-          fi
+          test -s android/app/release.keystore
 
-      # CONFIGURE GRADLE SIGNING
+          echo "Keystore decoded successfully."
+
+      # --------------------------------------------------
+      # PATCH GRADLE SIGNING CONFIG
+      # --------------------------------------------------
       - name: Configure Android release signing
+        shell: bash
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          python3 - <<'PY'
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
           import re
 
           path = "android/app/build.gradle"
 
-          with open(path, "r") as f:
-              content = f.read()
-
-          def find_block(text, keyword, start=0):
-              match = re.search(
-                  r"\b" + re.escape(keyword) + r"\s*\{",
-                  text[start:]
+          if not os.path.exists(path):
+              raise SystemExit(
+                  "android/app/build.gradle not found. "
+                  "This workflow expects Groovy Gradle."
               )
 
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          def find_block(text, pattern):
+              match = re.search(pattern, text)
               if not match:
-                  raise RuntimeError(
-                      f"Could not find block: {keyword}"
-                  )
+                  return None
 
-              match_start = start + match.start()
-              opening = text.find("{", match_start)
+              opening = text.find("{", match.start())
+              if opening < 0:
+                  return None
+
               depth = 0
-
               for i in range(opening, len(text)):
                   if text[i] == "{":
                       depth += 1
-
                   elif text[i] == "}":
                       depth -= 1
-
                       if depth == 0:
-                          return opening, i
+                          return match.start(), opening, i
 
-              raise RuntimeError(
-                  f"Unbalanced braces in {keyword}"
-              )
+              return None
 
-          def replace_block_contents(text, opening, closing, new_contents):
-              return (
-                  text[:opening + 1]
-                  + new_contents
-                  + text[closing:]
-              )
-
-          # Find android block.
-          android_open, android_close = find_block(
-              content, "android"
-          )
-
-          # Find or create signingConfigs.
-          try:
-              signing_open, signing_close = find_block(
-                  content,
-                  "signingConfigs",
-                  android_open + 1
-              )
-
-              # Existing signingConfigs block.
-              signing_body = content[
-                  signing_open + 1:signing_close
-              ]
-
-              # Replace existing release configuration if present.
-              try:
-                  release_open, release_close = find_block(
-                      signing_body, "release"
-                  )
-
-                  release_config = """
-              release {
-                  storeFile file("financeapp-release.keystore")
-                  storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                  keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                  keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-              }
-              """
-
-                  release_keyword_start = signing_body.rfind(
-                      "release", 0, release_open
-                  )
-                  
-                  signing_body = (
-                      signing_body[:release_keyword_start]
-                      + release_config
-                      + signing_body[release_close + 1:]
-                  )
-
-              except RuntimeError:
-                  release_config = """
-              release {
-                  storeFile file("financeapp-release.keystore")
-                  storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                  keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                  keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-              }
-              """
-
-                  signing_body += release_config
-
-              content = replace_block_contents(
-                  content,
-                  signing_open,
-                  signing_close,
-                  signing_body
-              )
-
-          except RuntimeError:
-              # No signingConfigs block exists.
-              signing_config = """
-              signingConfigs {
-                  release {
-                      storeFile file("financeapp-release.keystore")
-                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-                  }
-              }
-              """
-
-              content = (
-                  content[:android_open + 1]
-                  + signing_config
-                  + content[android_open + 1:]
-              )
-
-          # Locate buildTypes and its release block.
-          build_types_open, build_types_close = find_block(
-              content, "buildTypes"
-          )
-
-          release_open, release_close = find_block(
+          signing_block = find_block(
               content,
-              "release",
-              build_types_open + 1
+              r"\bsigningConfigs\s*\{"
           )
 
-          release_body = content[
-              release_open + 1:release_close
+          if not signing_block:
+              raise SystemExit("signingConfigs block not found.")
+
+          _, signing_open, signing_close = signing_block
+
+          release_config = """
+              release {
+                  storeFile file("release.keystore")
+                  storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                  keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                  keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
+          """
+
+          signing_inner = content[signing_open + 1:signing_close]
+
+          release_block = find_block(
+              signing_inner,
+              r"\brelease\s*\{"
+          )
+
+          if release_block:
+              start, opening, closing = release_block
+              signing_inner = (
+                  signing_inner[:start]
+                  + release_config
+                  + signing_inner[closing + 1:]
+              )
+          else:
+              signing_inner += "\n" + release_config + "\n"
+
+          content = (
+              content[:signing_open + 1]
+              + signing_inner
+              + content[signing_close:]
+          )
+
+          build_types_block = find_block(
+              content,
+              r"\bbuildTypes\s*\{"
+          )
+
+          if not build_types_block:
+              raise SystemExit("buildTypes block not found.")
+
+          _, build_types_open, build_types_close = build_types_block
+
+          build_types_inner = content[
+              build_types_open + 1:build_types_close
           ]
 
-          # Remove any existing signingConfig assignment.
-          release_body = re.sub(
-              r"(?m)^\s*signingConfig\s+signingConfigs\.\w+\s*$",
-              "",
-              release_body
+          release_build_block = find_block(
+              build_types_inner,
+              r"\brelease\s*\{"
           )
 
-          # Add release signing.
-          release_body = (
-              "\n        signingConfig signingConfigs.release\n"
-              + release_body
+          if not release_build_block:
+              raise SystemExit("release buildType not found.")
+
+          start, opening, closing = release_build_block
+
+          release_build_inner = build_types_inner[
+              opening + 1:closing
+          ]
+
+          if re.search(r"\bsigningConfig\s+", release_build_inner):
+              release_build_inner = re.sub(
+                  r"\bsigningConfig\s+signingConfigs\.\w+",
+                  "signingConfig signingConfigs.release",
+                  release_build_inner
+              )
+          else:
+              release_build_inner = (
+                  "\n"
+                  + "signingConfig signingConfigs.release\n"
+                  + release_build_inner
+              )
+
+          replacement = (
+              "release {\n"
+              + release_build_inner
+              + "\n}"
+          )
+
+          build_types_inner = (
+              build_types_inner[:start]
+              + replacement
+              + build_types_inner[closing + 1:]
           )
 
           content = (
-              content[:release_open + 1]
-              + release_body
-              + content[release_close:]
+              content[:build_types_open + 1]
+              + build_types_inner
+              + content[build_types_close:]
           )
 
-          with open(path, "w") as f:
+          with open(path, "w", encoding="utf-8") as f:
               f.write(content)
 
-          print("Release signing configured.")
+          print("Android release signing configured.")
           PY
 
+      # --------------------------------------------------
       # ANDROID BUILD
-      - name: Build Android APK
+      # --------------------------------------------------
+      - name: Build Android release APK
+        shell: bash
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          cd android
+          set -euo pipefail
 
-          chmod +x gradlew
+          cd android
 
           ./gradlew assembleRelease
 
-          cd ..
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
 
           APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
 
-          if [ ! -f "$APK_PATH" ]; then
-            echo "APK not found."
-            find android -name "*.apk"
+          if [ ! -s "$APK_PATH" ]; then
+            echo "APK not found: $APK_PATH"
+            find android/app/build/outputs -type f
             exit 1
           fi
 
-          cp "$APK_PATH" FinanceApp.apk
-
-      # VERIFY APK SIGNATURE
-      - name: Verify Android APK signature
-        run: |
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
             -name apksigner \
             -type f \
@@ -541,24 +453,32 @@ jobs:
             exit 1
           fi
 
-          "$APKSIGNER" verify \
-            --verbose \
-            --print-certs \
-            FinanceApp.apk
+          "$APKSIGNER" verify --verbose --print-certs "$APK_PATH"
 
-      # CLEANUP KEYSTORE
-      - name: Remove temporary keystore
+          cp "$APK_PATH" FinanceApp.apk
+
+          echo "APK successfully verified."
+
+      # --------------------------------------------------
+      # CLEAN UP SIGNING KEY
+      # --------------------------------------------------
+      - name: Remove Android keystore
         if: always()
+        shell: bash
         run: |
-          rm -f android/app/financeapp-release.keystore
+          rm -f android/app/release.keystore
 
-      # GITHUB RELEASE
-      - name: Create GitHub Release
+      # --------------------------------------------------
+      # CREATE GITHUB RELEASE
+      # --------------------------------------------------
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: FinanceApp ${{ steps.version.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
+          name: FinanceApp v${{ steps.version.outputs.version }}
           generate_release_notes: true
           files: |
-            FinanceApp-unsigned.ipa
             FinanceApp.apk
+            FinanceApp-unsigned.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
