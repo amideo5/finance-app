@@ -1,0 +1,190 @@
+
+name: FinanceApp Mobile Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Choose release version increment"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: financeapp-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # =========================
+      # SETUP
+      # =========================
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+
+      # =========================
+      # VERSION
+      # =========================
+
+      - name: Determine next release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          latest=$(gh release list \
+            --limit 100 \
+            --json tagName \
+            --jq '.[].tagName' |
+            grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
+            sort -V |
+            tail -n 1)
+
+          if [ -z "$latest" ]; then
+            echo "No existing numeric release found."
+            exit 1
+          fi
+
+          IFS='.' read -r major minor patch <<< "$latest"
+
+          case "$RELEASE_TYPE" in
+            patch)
+              patch=$((patch + 1))
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            *)
+              echo "Invalid release type"
+              exit 1
+              ;;
+          esac
+
+          version="${major}.${minor}.${patch}"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          echo "Previous version: $latest"
+          echo "New version: $version"
+
+      # =========================
+      # GENERATE IOS PROJECT
+      # =========================
+
+      - name: Generate iOS native project
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install
+          cd ..
+
+      # =========================
+      # IOS BUILD
+      # =========================
+
+      - name: Build iOS
+        shell: bash
+        run: |
+          WORKSPACE=$(find ios -maxdepth 1 -name "*.xcworkspace" | head -n 1)
+
+          if [ -z "$WORKSPACE" ]; then
+            echo "No iOS workspace found."
+            exit 1
+          fi
+
+          WORKSPACE_NAME=$(basename "$WORKSPACE" .xcworkspace)
+
+          echo "Workspace: $WORKSPACE"
+          echo "Scheme: $WORKSPACE_NAME"
+
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$WORKSPACE_NAME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          mkdir -p Payload
+
+          APP_PATH="build/ios/Build/Products/Release-iphoneos/${WORKSPACE_NAME}.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Built application not found: $APP_PATH"
+            find build/ios/Build/Products -name "*.app"
+            exit 1
+          fi
+
+          cp -R "$APP_PATH" Payload/
+
+          zip -r FinanceApp-unsigned.ipa Payload
+
+          rm -rf Payload
+
+      # =========================
+      # ANDROID BUILD
+      # =========================
+
+      - name: Build Android using EAS
+        env:
+          EXPO_TOKEN: ${{ secrets.EAS_TOKEN }}
+        run: |
+          eas build \
+            --platform android \
+            --profile production \
+            --non-interactive \
+            --wait
+
+      - name: Download Android APK
+        env:
+          EXPO_TOKEN: ${{ secrets.EAS_TOKEN }}
+        run: |
+          eas build:download \
+            --latest \
+            --platform android \
+            --path FinanceApp.apk
+
+      # =========================
+      # GITHUB RELEASE
+      # =========================
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: FinanceApp ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            FinanceApp-unsigned.ipa
+            FinanceApp.apk
