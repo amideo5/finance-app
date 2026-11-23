@@ -184,7 +184,7 @@ export default function SettingsScreen() {
               </View>
               <View style={styles.settingText}>
                 <Text style={styles.settingLabel}>PIN Lock</Text>
-                <Text style={styles.settingValue}>Secure access to your finance app</Text>
+                <Text style={styles.settingValue}>Secure access to your app</Text>
               </View>
             </View>
             <ChevronRight color={colors.textSecondary} size={20} />

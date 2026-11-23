@@ -46,7 +46,7 @@ function RootNavigation() {
   const handleBiometricUnlock = async () => {
     try {
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: 'Unlock Finance App',
+        promptMessage: 'Unlock App',
         cancelLabel: 'Use PIN',
         disableDeviceFallback: true,
       });

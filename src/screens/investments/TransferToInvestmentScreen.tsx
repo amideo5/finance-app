@@ -591,7 +591,7 @@ export default function TransferToInvestmentScreen() {
               Both ledgers stay in sync
             </Text>
             <Text style={styles.guaranteeText}>
-              The main finance app receives an Investment Transfer expense and
+              The main app receives an Investment Transfer expense and
               the selected holding receives an inflow. If any write fails,
               the full transfer is rolled back.
             </Text>

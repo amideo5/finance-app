@@ -602,7 +602,7 @@ export default function StatementScreen() {
     <div class="metric"><span>Transactions</span><strong>${visibleTransactions.length}</strong></div></div>
   <div class="filters"><strong>Applied filters</strong><br/>${filters.map((filter) => htmlEscape(filter)).join(' &nbsp; · &nbsp; ')}</div>
   <table><thead><tr><th style="width:8%">Date</th><th style="width:17%">Transaction</th><th style="width:7%">Type</th><th style="width:8%">Payment</th><th style="width:10%">Account</th><th style="width:11%">Treatment</th><th style="width:12%">Split</th><th style="width:12%;text-align:right">Amount</th><th style="width:15%">Notes</th></tr></thead><tbody>${tableRows}</tbody></table>
-  <div class="foot"><span>Generated from your Finance App. This report reflects the filters shown above.</span><span>${htmlEscape(currency)} · ${visibleTransactions.length} entries</span></div>
+  <div class="foot"><span>Generated from your App. This report reflects the filters shown above.</span><span>${htmlEscape(currency)} · ${visibleTransactions.length} entries</span></div>
 </body></html>`;
 
     try {

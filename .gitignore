@@ -22,6 +22,7 @@ local.properties
 # *.jks
 # *.keystore
 # !android/app/debug.keystore
+credentials.json
 
 # -------------------------------------------------------------------
 # iOS Native Configs & Build Outputs
@@ -91,3 +92,4 @@ ehthumbs.db
 git_changes
 ios
 android
+

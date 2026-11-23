@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Finance App",
+    "name": "Your Money Space",
     "slug": "bolt-expo-nativewind",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -9,18 +9,18 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.embrise.financeapp",
+      "bundleIdentifier": "com.embrise.yourmoneyspace",
       "icon": "./assets/images/icon.png"
     },
     "android": {
-      "package": "com.embrise.financeapp",
+      "package": "com.embrise.yourmoneyspace",
       "icon": "./assets/images/icon.png",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon-foreground.png",
         "backgroundColor": "#101827"
       }
     },
-    "web": {
+    "web": { 
       "bundler": "metro",
       "output": "single",
       "favicon": "./assets/images/favicon.png"
@@ -37,7 +37,7 @@
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "Allow Finance App to use Face ID to unlock your financial information."
+          "faceIDPermission": "Allow App to use Face ID to unlock your financial information."
         }
       ]
     ],
