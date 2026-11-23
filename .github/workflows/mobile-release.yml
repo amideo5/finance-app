@@ -482,3 +482,26 @@ jobs:
             FinanceApp-unsigned.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # --------------------------------------------------
+      # TRIGGER WEBSITE RELEASE SYNC
+      # --------------------------------------------------
+      - name: Trigger website release update
+        shell: bash
+        env:
+          WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          curl --fail-with-body \
+            --request POST \
+            --url https://api.github.com/repos/amideo5/amideo5.github.io/dispatches \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $WEBSITE_REPO_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "{\"event_type\":\"finance-app-release\",\"client_payload\":{\"version\":\"$RELEASE_VERSION\"}}"
+
+          echo "Website release update triggered."
+
