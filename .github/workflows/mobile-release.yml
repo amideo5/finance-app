@@ -48,6 +48,7 @@ jobs:
       # VERSION
       # =========================
 
+      
       - name: Determine next release version
         id: version
         env:
@@ -58,14 +59,19 @@ jobs:
             --limit 100 \
             --json tagName \
             --jq '.[].tagName' |
+            sed 's/^v//' |
             grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
             sort -V |
             tail -n 1)
 
           if [ -z "$latest" ]; then
-            echo "No existing numeric release found."
+            echo "Could not find a numeric GitHub Release."
+            echo "Available releases:"
+            gh release list --limit 100
             exit 1
           fi
+
+          echo "Found latest release: $latest"
 
           IFS='.' read -r major minor patch <<< "$latest"
 
@@ -83,7 +89,7 @@ jobs:
               patch=0
               ;;
             *)
-              echo "Invalid release type"
+              echo "Invalid release type: $RELEASE_TYPE"
               exit 1
               ;;
           esac
@@ -94,6 +100,7 @@ jobs:
 
           echo "Previous version: $latest"
           echo "New version: $version"
+          echo "Release type: $RELEASE_TYPE"
 
       # =========================
       # GENERATE IOS PROJECT
