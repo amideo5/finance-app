@@ -1,3 +1,4 @@
+
 name: FinanceApp Mobile Release
 
 on:
@@ -25,17 +26,13 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      # --------------------------------------------------
       # CHECKOUT
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # --------------------------------------------------
       # NODE
-      # --------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -44,9 +41,7 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # --------------------------------------------------
       # VERSION
-      # --------------------------------------------------
       - name: Determine next release version
         id: version
         env:
@@ -79,7 +74,8 @@ jobs:
 
           if not versions:
               raise SystemExit(
-                  "No semantic version tags found."
+                  "No semantic version tags found. "
+                  "Create your first Git tag before running this workflow."
               )
 
           major, minor, patch = max(versions)
@@ -103,9 +99,11 @@ jobs:
 
           version = f"{major}.{minor}.{patch}"
 
-          # Android version code
-          version_code = major * 100000 + minor * 1000 + patch
+          # Android versionCode.
+          # Assumes minor and patch remain below 1000.
+          version_code = major * 1000000 + minor * 1000 + patch
 
+          print("Previous version:", max(versions))
           print("New version:", version)
           print("Android version code:", version_code)
 
@@ -114,9 +112,7 @@ jobs:
               f.write(f"version_code={version_code}\n")
           PY
 
-      # --------------------------------------------------
       # UPDATE EXPO APP VERSION
-      # --------------------------------------------------
       - name: Update app version
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
@@ -127,6 +123,12 @@ jobs:
           import os
 
           path = "app.json"
+
+          if not os.path.exists(path):
+              raise SystemExit(
+                  "app.json not found. "
+                  "This workflow currently expects app.json."
+              )
 
           with open(path, "r") as f:
               data = json.load(f)
@@ -148,39 +150,125 @@ jobs:
           print("Expo version updated.")
           PY
 
-      # --------------------------------------------------
+      # VERIFY EXPO CONFIG
+      - name: Verify Expo configuration
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          EXPECTED_VERSION_CODE: ${{ steps.version.outputs.version_code }}
+        run: |
+          npx expo config --json > expo-config.json
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("expo-config.json") as f:
+              config = json.load(f)
+
+          version = config.get("version")
+          version_code = config.get("android", {}).get("versionCode")
+
+          expected_version = os.environ["EXPECTED_VERSION"]
+          expected_version_code = int(
+              os.environ["EXPECTED_VERSION_CODE"]
+          )
+
+          print("Resolved Expo version:", version)
+          print("Resolved Android versionCode:", version_code)
+
+          if version != expected_version:
+              raise SystemExit(
+                  f"Expo version mismatch: {version} != {expected_version}"
+              )
+
+          if version_code != expected_version_code:
+              raise SystemExit(
+                  "Android versionCode mismatch: "
+                  f"{version_code} != {expected_version_code}"
+              )
+
+          print("Expo configuration verified.")
+          PY
+
       # EXPO PREBUILD
-      # --------------------------------------------------
       - name: Generate native projects
         run: npx expo prebuild --platform all --no-install
 
-      # --------------------------------------------------
       # IOS
-      # --------------------------------------------------
       - name: Install CocoaPods
         run: |
           cd ios
           pod install
           cd ..
 
+      - name: Discover iOS workspace and scheme
+        id: ios
+        run: |
+          WORKSPACE=$(find ios -maxdepth 1 \
+            -name "*.xcworkspace" \
+            -print -quit)
+
+          if [ -z "$WORKSPACE" ]; then
+            echo "No iOS workspace found."
+            exit 1
+          fi
+
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+
+          xcodebuild -list -json -workspace "$WORKSPACE" \
+            > xcode-list.json
+
+          SCHEME=$(python3 - <<'PY'
+          import json
+
+          with open("xcode-list.json") as f:
+              data = json.load(f)
+
+          schemes = data.get("workspace", {}).get("schemes", [])
+
+          if not schemes:
+              raise SystemExit("No Xcode schemes found.")
+
+          preferred = "FinanceApp"
+
+          if preferred in schemes:
+              print(preferred)
+          else:
+              print(schemes[0])
+          PY
+          )
+
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+          echo "Workspace: $WORKSPACE"
+          echo "Scheme: $SCHEME"
+
       - name: Build iOS
+        env:
+          IOS_WORKSPACE: ${{ steps.ios.outputs.workspace }}
+          IOS_SCHEME: ${{ steps.ios.outputs.scheme }}
         run: |
           xcodebuild \
-            -workspace ios/FinanceApp.xcworkspace \
-            -scheme FinanceApp \
+            -workspace "$IOS_WORKSPACE" \
+            -scheme "$IOS_SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/ios \
             CODE_SIGNING_ALLOWED=NO \
             build
 
-          APP_PATH="build/ios/Build/Products/Release-iphoneos/FinanceApp.app"
+          APP_PATH=$(find build/ios/Build/Products \
+            -type d \
+            -name "*.app" \
+            -print -quit)
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "Built iOS application not found"
-            find build/ios/Build/Products -name "*.app"
+          if [ -z "$APP_PATH" ]; then
+            echo "Built iOS application not found."
+            find build/ios/Build/Products
             exit 1
           fi
+
+          echo "Built app: $APP_PATH"
 
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
@@ -189,24 +277,25 @@ jobs:
 
           rm -rf Payload
 
-      # --------------------------------------------------
+          if [ ! -f FinanceApp-unsigned.ipa ]; then
+            echo "IPA creation failed."
+            exit 1
+          fi
+
       # JAVA
-      # --------------------------------------------------
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # --------------------------------------------------
       # ANDROID KEYSTORE
-      # --------------------------------------------------
       - name: Configure Android signing key
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "ANDROID_KEYSTORE_BASE64 secret is missing"
+            echo "ANDROID_KEYSTORE_BASE64 secret is missing."
             exit 1
           fi
 
@@ -216,12 +305,12 @@ jobs:
             | base64 -D \
             > android/app/financeapp-release.keystore
 
-          test -s android/app/financeapp-release.keystore
+          if [ ! -s android/app/financeapp-release.keystore ]; then
+            echo "Keystore file is empty."
+            exit 1
+          fi
 
-      # --------------------------------------------------
       # CONFIGURE GRADLE SIGNING
-      # --------------------------------------------------
-
       - name: Configure Android release signing
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -254,6 +343,7 @@ jobs:
               for i in range(opening, len(text)):
                   if text[i] == "{":
                       depth += 1
+
                   elif text[i] == "}":
                       depth -= 1
 
@@ -264,34 +354,77 @@ jobs:
                   f"Unbalanced braces in {keyword}"
               )
 
-          # Locate android block
+          def replace_block_contents(text, opening, closing, new_contents):
+              return (
+                  text[:opening + 1]
+                  + new_contents
+                  + text[closing:]
+              )
+
+          # Find android block.
           android_open, android_close = find_block(
               content, "android"
           )
 
-          # Locate or create signingConfigs block
+          # Find or create signingConfigs.
           try:
               signing_open, signing_close = find_block(
-                  content, "signingConfigs",
+                  content,
+                  "signingConfigs",
                   android_open + 1
               )
 
-              signing_config = """
-                  release {
-                      storeFile file("financeapp-release.keystore")
-                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-                  }
+              # Existing signingConfigs block.
+              signing_body = content[
+                  signing_open + 1:signing_close
+              ]
+
+              # Replace existing release configuration if present.
+              try:
+                  release_open, release_close = find_block(
+                      signing_body, "release"
+                  )
+
+                  release_config = """
+              release {
+                  storeFile file("financeapp-release.keystore")
+                  storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                  keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                  keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
               """
 
-              content = (
-                  content[:signing_close]
-                  + signing_config
-                  + content[signing_close:]
+                  release_keyword_start = signing_body.rfind(
+                      "release", 0, release_open
+                  )
+                  
+                  signing_body = (
+                      signing_body[:release_keyword_start]
+                      + release_config
+                      + signing_body[release_close + 1:]
+                  )
+
+              except RuntimeError:
+                  release_config = """
+              release {
+                  storeFile file("financeapp-release.keystore")
+                  storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                  keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                  keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
+              """
+
+                  signing_body += release_config
+
+              content = replace_block_contents(
+                  content,
+                  signing_open,
+                  signing_close,
+                  signing_body
               )
 
           except RuntimeError:
+              # No signingConfigs block exists.
               signing_config = """
               signingConfigs {
                   release {
@@ -309,14 +442,14 @@ jobs:
                   + content[android_open + 1:]
               )
 
-          # Locate buildTypes block
+          # Locate buildTypes and its release block.
           build_types_open, build_types_close = find_block(
               content, "buildTypes"
           )
 
-          # Locate release block inside buildTypes
           release_open, release_close = find_block(
-              content, "release",
+              content,
+              "release",
               build_types_open + 1
           )
 
@@ -324,14 +457,14 @@ jobs:
               release_open + 1:release_close
           ]
 
-          # Remove any previous release signing assignment
+          # Remove any existing signingConfig assignment.
           release_body = re.sub(
-              r"signingConfig\s+signingConfigs\.\w+",
+              r"(?m)^\s*signingConfig\s+signingConfigs\.\w+\s*$",
               "",
               release_body
           )
 
-          # Insert release signing assignment
+          # Add release signing.
           release_body = (
               "\n        signingConfig signingConfigs.release\n"
               + release_body
@@ -346,12 +479,10 @@ jobs:
           with open(path, "w") as f:
               f.write(content)
 
-          print("Release signing configured successfully.")
+          print("Release signing configured.")
           PY
 
-      # --------------------------------------------------
       # ANDROID BUILD
-      # --------------------------------------------------
       - name: Build Android APK
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -369,24 +500,24 @@ jobs:
           APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
 
           if [ ! -f "$APK_PATH" ]; then
-            echo "APK not found!"
+            echo "APK not found."
             find android -name "*.apk"
             exit 1
           fi
 
           cp "$APK_PATH" FinanceApp.apk
 
-      # --------------------------------------------------
       # VERIFY APK SIGNATURE
-      # --------------------------------------------------
       - name: Verify Android APK signature
         run: |
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
             -name apksigner \
-            -type f | sort -V | tail -n 1)
+            -type f \
+            | sort -V \
+            | tail -n 1)
 
           if [ -z "$APKSIGNER" ]; then
-            echo "apksigner not found"
+            echo "apksigner not found."
             exit 1
           fi
 
@@ -395,17 +526,13 @@ jobs:
             --print-certs \
             FinanceApp.apk
 
-      # --------------------------------------------------
       # CLEANUP KEYSTORE
-      # --------------------------------------------------
       - name: Remove temporary keystore
         if: always()
         run: |
           rm -f android/app/financeapp-release.keystore
 
-      # --------------------------------------------------
       # GITHUB RELEASE
-      # --------------------------------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
